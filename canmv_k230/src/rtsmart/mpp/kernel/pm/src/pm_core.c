@@ -64,19 +64,19 @@ static struct pm_dev pm_device = {
 
 static int pm_core_default(void)
 {
-    pm_device.thermal_shutdown_temp = 20000;
+    pm_device.thermal_shutdown_temp = 8500; // 85.00 C in 0.01 C units
 
     pm_device.dev[PM_DOMAIN_CPU]->expect_profile_idx = 0;
     pm_device.dev[PM_DOMAIN_CPU]->actual_profile_idx = 0;
-    pm_device.dev[PM_DOMAIN_CPU]->governor = PM_GOVERNOR_MANUAL;
-    pm_device.dev[PM_DOMAIN_CPU]->thermal_protect_temp = 20000;
-    pm_device.dev[PM_DOMAIN_CPU]->thermal_protect_idx = 0;
+    pm_device.dev[PM_DOMAIN_CPU]->governor = PM_GOVERNOR_AUTO;
+    pm_device.dev[PM_DOMAIN_CPU]->thermal_protect_temp = 6800; // 68.00 C
+    pm_device.dev[PM_DOMAIN_CPU]->thermal_protect_idx = 4;     // 400 MHz
 
     pm_device.dev[PM_DOMAIN_KPU]->expect_profile_idx = 0;
     pm_device.dev[PM_DOMAIN_KPU]->actual_profile_idx = 0;
     pm_device.dev[PM_DOMAIN_KPU]->governor = PM_GOVERNOR_MANUAL;
-    pm_device.dev[PM_DOMAIN_KPU]->thermal_protect_temp = 20000;
-    pm_device.dev[PM_DOMAIN_KPU]->thermal_protect_idx = 0;
+    pm_device.dev[PM_DOMAIN_KPU]->thermal_protect_temp = 6800; // 68.00 C
+    pm_device.dev[PM_DOMAIN_KPU]->thermal_protect_idx = 2;
 
     return 0;
 }
@@ -456,10 +456,46 @@ static const struct dfs_file_ops pm_core_fops = {
     .ioctl = pm_core_ioctl,
 };
 
+/*
+ * K230 tsensor 4th-order polynomial evaluated in Q48 fixed-point:
+ * T(C) = 1.01472e-10*x^4 - 1.10063e-6*x^3 + 4.36150e-3*x^2 - 7.10128*x + 3565.87
+ * Returns temperature in 0.01 C units (e.g., 6800 = 68.00 C).
+ */
+#define TS_TEMP_Q48_A  28562LL
+#define TS_TEMP_Q48_B  (-309799804LL)
+#define TS_TEMP_Q48_C  1227653110924LL
+#define TS_TEMP_Q48_D  (-1998832622615847LL)
+#define TS_TEMP_Q48_E  1003703175203226880LL
+#define TS_Q48_PER_CC  ((1LL << 48) / 100)
+
 static int32_t get_temperature(void)
 {
-    // todo get temperature
-    return 0;
+    static rt_device_t ts_dev = RT_NULL;
+    rt_uint32_t raw_val = 0;
+
+    if (ts_dev == RT_NULL) {
+        ts_dev = rt_device_find("ts");
+        if (ts_dev != RT_NULL) {
+            rt_device_open(ts_dev, RT_DEVICE_OFLAG_RDONLY);
+        }
+    }
+    if (ts_dev == RT_NULL)
+        return 0;
+
+    if (rt_device_read(ts_dev, 0, &raw_val, sizeof(raw_val)) == 0)
+        return 0;
+
+    int64_t code = (int64_t)(raw_val & 0xfffU);
+    if (code <= 0)
+        return 0;
+
+    int64_t temp_q48 = TS_TEMP_Q48_A;
+    temp_q48 = temp_q48 * code + TS_TEMP_Q48_B;
+    temp_q48 = temp_q48 * code + TS_TEMP_Q48_C;
+    temp_q48 = temp_q48 * code + TS_TEMP_Q48_D;
+    temp_q48 = temp_q48 * code + TS_TEMP_Q48_E;
+
+    return (int32_t)(temp_q48 / TS_Q48_PER_CC);
 }
 
 static void shutdown(void)
@@ -467,7 +503,12 @@ static void shutdown(void)
     pm_domain_enable_power(pm_device.dev[PM_DOMAIN_KPU], false);
     pm_domain_enable_power(pm_device.dev[PM_DOMAIN_DPU], false);
     pm_domain_enable_power(pm_device.dev[PM_DOMAIN_VPU], false);
-    // todo poweroff
+    if (pm_device.dev[PM_DOMAIN_CPU]) {
+        pm_device.dev[PM_DOMAIN_CPU]->thermal_over = true;
+        pm_device.dev[PM_DOMAIN_CPU]->thermal_protect_idx =
+            pm_device.dev[PM_DOMAIN_CPU]->profile_nr - 1; // 200 MHz minimum profile
+        pm_domain_set_actual_profile(pm_device.dev[PM_DOMAIN_CPU]);
+    }
 }
 
 static void thermal_detect_thread(void *arg)
@@ -543,9 +584,13 @@ int pm_core_init(void)
         rt_tick_from_millisecond(10));
     rt_thread_startup(tid);
 
-    // temporary fix
-    pm_domain_enable_clock(pm_device.dev[PM_DOMAIN_KPU], true);
-    pm_domain_enable_power(pm_device.dev[PM_DOMAIN_KPU], true);
+    // Keep unused AI/3D/Video domains powered off by default at boot to reduce die heat
+    pm_domain_enable_clock(pm_device.dev[PM_DOMAIN_KPU], false);
+    pm_domain_enable_power(pm_device.dev[PM_DOMAIN_KPU], false);
+    pm_domain_enable_clock(pm_device.dev[PM_DOMAIN_DPU], false);
+    pm_domain_enable_power(pm_device.dev[PM_DOMAIN_DPU], false);
+    pm_domain_enable_clock(pm_device.dev[PM_DOMAIN_VPU], false);
+    pm_domain_enable_power(pm_device.dev[PM_DOMAIN_VPU], false);
 
     return ret;
 }

@@ -7,7 +7,7 @@
 #include <sys/ioctl.h>
 #include "cconfig.h"
 #include <rtthread.h>
-#include <rtdevice.h>
+//#include <rtdevice.h>
 #include "../../../../../../fpioa/rt_fpioa.h"
 #define USE_SPI_HW
 //#define USE_SPI_SOFT

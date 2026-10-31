@@ -4,7 +4,7 @@ BROOKESIA_CSRCS += $(shell find $(BROOKESIA_PATH)/src -type f -name '*.c')
 #BROOKESIA_CSRCS += $(shell find $(LVGL_PATH)/demos -type f -name '*.c')
 #BROOKESIA_CSRCS += $(shell find $(LVGL_PATH)/examples -type f -name '*.c')
 CXXEXT := .cpp
-BROOKESIA_CXXSRCS += $(shell find $(BROOKESIA_PATH)/src -type f -name '*${CXXEXT}')
+BROOKESIA_CXXSRCS += $(filter-out %/camera_face_emotion/Camera_face_emotion.cpp %/camera_head_detect/Camera_head_detect.cpp %/camera_object_detect/Camera_object_detect.cpp %/camera_object_segment/Camera_object_segment.cpp, $(shell find $(BROOKESIA_PATH)/src -type f -name '*${CXXEXT}'))
 
 BROOKESIA_CFLAGS += -I$(BROOKESIA_PATH)
 BROOKESIA_CFLAGS += -I${shell pwd}/ui_brookesia/src

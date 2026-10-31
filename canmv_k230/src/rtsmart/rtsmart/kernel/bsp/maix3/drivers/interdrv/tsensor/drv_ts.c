@@ -58,17 +58,23 @@ rt_size_t ts_device_read(rt_device_t dev, rt_off_t pos, void *buffer, rt_size_t 
     rt_thread_mdelay(20);
     kd_hardlock_unlock(ts_hardlock);
 
-    while(1)
+    int timeout = 50000;
+    while(timeout-- > 0)
     {
         val = readl(ts_read_addr);
 
         if(val >> 12)
         {
             *outbuf = val;
+            ret = sizeof(outbuf) / sizeof(outbuf[0]);
             break;
-        }   
+        }
+        rt_hw_us_delay(1);
     }
-    ret = sizeof(outbuf) / sizeof(outbuf[0]);
+    if (timeout <= 0) {
+        *outbuf = 0;
+        ret = 0;
+    }
 
     return ret;
 }

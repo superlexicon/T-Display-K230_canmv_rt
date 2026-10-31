@@ -126,9 +126,11 @@ static bool touchpad_is_pressed(void);
 static void touchpad_get_xy(lv_coord_t * x, lv_coord_t * y);
 
 
+#if 0
 static void keypad_init(void);
 static void keypad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data);
 static uint32_t keypad_get_key(void);
+#endif
 /**********************
  *  STATIC VARIABLES
  **********************/
@@ -157,20 +159,6 @@ void lv_port_indev_init(void)
      */
 
     static lv_indev_drv_t indev_drv;
-    static lv_indev_drv_t indev_drv2;
-    
-    /*------------------
-     * Keypad
-     * -----------------*/
-
-    /*Initialize your keypad or keyboard if you have*/
-    keypad_init();
-    
-    /*Register a keypad input device*/
-    lv_indev_drv_init(&indev_drv2);
-    indev_drv2.type = LV_INDEV_TYPE_KEYPAD;
-    indev_drv2.read_cb = keypad_read;
-    indev_keypad = lv_indev_drv_register(&indev_drv2);
     
     /*------------------
      * Touchpad
@@ -184,13 +172,6 @@ void lv_port_indev_init(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = touchpad_read;
     indev_touchpad = lv_indev_drv_register(&indev_drv);
-    
-     
- 
-     lv_group_t * group = lv_group_create();
-     //lv_group_add_obj(group, lv_scr_act()); 
-     lv_group_set_default(group);	
-     lv_indev_set_group(indev_keypad, group);
     
     
     
@@ -266,52 +247,31 @@ static void touchpad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
     data->point.y = last_y;
 }
 
+static lv_coord_t cached_touch_x = 0;
+static lv_coord_t cached_touch_y = 0;
+
 /*Return true is the touchpad is pressed*/
 static bool touchpad_is_pressed(void)
 {
-    /*Your code comes here*/
-     #if 0
-    if(touch_flag==1)
-    { touch_flag=0;    
-    return true;
-    }
-    else
+    struct rt_touch_data touch_data[1];
+    int point_number = read(fd_touch, touch_data, sizeof(touch_data));
+    point_number /= (int)sizeof(struct rt_touch_data);
+    if (point_number > 0)
     {
+        cached_touch_x = (lv_coord_t)touch_data[0].x_coordinate;
+        cached_touch_y = (lv_coord_t)touch_data[0].y_coordinate;
+        return true;
+    }
     return false;
-    }
-    #endif
-    #if 1
-     int point_number =1;
-    struct rt_touch_data touch_data[point_number];
-    point_number = read(fd_touch, touch_data, sizeof(touch_data));
-    point_number /= sizeof(struct rt_touch_data);
-    if(point_number>0)
-    {
-    return true;
-    }
-    else
-    {
-    return false;
-    }
-    #endif
 }
 
 /*Get the x and y coordinates if the touchpad is pressed*/
 static void touchpad_get_xy(lv_coord_t * x, lv_coord_t * y)
 {
-    /*Your code comes here*/
-
-    int point_number =1;
- struct rt_touch_data touch_data[point_number];
-    point_number = read(fd_touch, touch_data, sizeof(touch_data));
-    point_number /= sizeof(struct rt_touch_data);
-  if(point_number)
-  {
-  (*x)=touch_data[0].x_coordinate;
-  (*y)=touch_data[0].y_coordinate;
-  }
+    (*x) = cached_touch_x;
+    (*y) = cached_touch_y;
 }
-#if 1
+#if 0
 
 /*------------------
  * Keypad

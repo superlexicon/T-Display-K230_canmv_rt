@@ -128,7 +128,8 @@ fpioa_set_function(35,GPIO35,-1,-1,-1,-1,-1,-1,-1);
 }
 void vo_display_set_brightness(int bright_val)
 {
-        kd_mpi_connector_set_brightness(connector_fd,bright_val);	
+        (void)bright_val;
+        //kd_mpi_connector_set_brightness(connector_fd,bright_val);	
 }
 k_u32 vb_create_pool(k_u32 pool_blk_cnt,k_u64 pool_blk_size)
 {

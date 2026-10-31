@@ -26,34 +26,41 @@
 #include "app_examples/phone/setting/Setting.hpp"
 #include "app_examples/phone/led/Led.hpp"
 #include "app_examples/phone/camera_face_detect/Camera_face_detect.hpp"
-#include "app_examples/phone/camera_head_detect/Camera_head_detect.hpp"
-#include "app_examples/phone/camera_face_emotion/Camera_face_emotion.hpp"
+//#include "app_examples/phone/camera_head_detect/Camera_head_detect.hpp"
+//#include "app_examples/phone/camera_face_emotion/Camera_face_emotion.hpp"
 //#include "app_examples/phone/camera_object_segment/Camera_object_segment.hpp"
-#include "app_examples/phone/camera_object_detect/Camera_object_detect.hpp"
+//#include "app_examples/phone/camera_object_detect/Camera_object_detect.hpp"
 #include "app_examples/phone/clock/Clock.hpp"
 #include "app_examples/phone/artboard/Artboard.hpp"
 #include "app_examples/phone/ble/Ble.hpp"
 #include "app_examples/phone/battery/Battery.hpp"
 #include "app_examples/phone/video/Video.hpp"
 #include "app_examples/phone/live_call/LiveCall.hpp"
-#include "app_examples/phone/live_call_test/LiveCallTest.hpp"
-#include "app_examples/phone/live_call_send/LiveCallSend.hpp"
-#include "app_examples/phone/live_call_recv/LiveCallRecv.hpp"
+//#include "app_examples/phone/live_call_test/LiveCallTest.hpp"
+//#include "app_examples/phone/live_call_send/LiveCallSend.hpp"
+//#include "app_examples/phone/live_call_recv/LiveCallRecv.hpp"
 #include "app_examples/phone/weather/Weather.hpp"
-#include "app_examples/phone/keyboard/KeyBoard.hpp"
+//#include "app_examples/phone/keyboard/KeyBoard.hpp"
 #include "app_examples/phone/gnss/Gnss.hpp"
 #include "app_examples/phone/cellular/Cellular.hpp"
+#include "brookesia_app.hpp"
 #define USING_BLE
 #define USING_WEATHER
-#define USING_KEYBOARD
-#define USING_BATTERY
-#define USING_FAN
-#define USING_LTE_GNSS
-static int gpio_fd;
-static int fd_ts;
+//#define USING_KEYBOARD
+// Disable synchronous I2C4 battery polling & thermal sensor reads in UI timer to prevent UI freezes
+//#define USING_BATTERY
+//#define USING_FAN
+// Do NOT define USING_LTE_GNSS here because it remuxes GPIO5 (LR2021 RADIO_RST_PIN) to UART2_TXD
+//#define USING_LTE_GNSS
+static int gpio_fd = -1;
+static int fd_ts = -1;
+static volatile int g_os_thermal_level = 0; // 0 = normal (<68C), 1 = throttle (68..82C), 2 = emergency cutoff (>=82C)
+static volatile int g_os_cpu_dvfs_stage = -1; // 0=AUTO, 1=1188MHz, 2=800MHz, 3=594MHz, 4=400MHz, 5=200MHz
 #include <fcntl.h>
-#include<sys/ioctl.h>
+#include <time.h>
+#include <sys/ioctl.h>
 #include "fpioa/rt_fpioa.h"
+#include "mpi_pm_api.h"
 /* ioctl */
 #define	GPIO_DM_OUTPUT           _IOW('G', 0, int)
 #define	GPIO_DM_INPUT            _IOW('G', 1, int)
@@ -61,6 +68,155 @@ static int fd_ts;
 #define	GPIO_DM_INPUT_PULL_DOWN  _IOW('G', 3, int)
 #define	GPIO_WRITE_LOW           _IOW('G', 4, int)
 #define	GPIO_WRITE_HIGH          _IOW('G', 5, int)
+
+static void write_os_thermal_state(int level, double temp_c) {
+    struct timespec ts = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    FILE *fp = fopen("/tmp/os_thermal_state", "w");
+    if (fp) {
+        fprintf(fp, "%d %.1f %ld\n", level, temp_c, (long)ts.tv_sec);
+        fclose(fp);
+    }
+}
+
+static void apply_cpu_dvfs_stage(int stage, double temp_c) {
+    if (stage == g_os_cpu_dvfs_stage) {
+        return;
+    }
+    if (stage <= 0) {
+        kd_mpi_pm_set_governor(PM_DOMAIN_CPU, PM_GOVERNOR_AUTO);
+        printf("[OS-THERMAL] CPU1 DVFS -> AUTO (200 MHz idle / on-demand scaling) at %.1f C\n", temp_c);
+        stage = 0;
+    } else {
+        // stage 1..5 maps directly to K230 PM_DOMAIN_CPU hardware profile index 1..5:
+        // 1 = 1.188 GHz (-26% power), 2 = 800 MHz (-50%), 3 = 594 MHz (-63%), 4 = 400 MHz (-75%), 5 = 200 MHz (-87.5%)
+        static const int kFreqMhz[6] = {1600, 1188, 800, 594, 400, 200};
+        if (stage > 5) stage = 5;
+        kd_mpi_pm_set_governor(PM_DOMAIN_CPU, PM_GOVERNOR_MANUAL);
+        kd_mpi_pm_set_profile(PM_DOMAIN_CPU, stage);
+        printf("[OS-THERMAL] CPU1 DVFS -> Profile %d (%d MHz) at %.1f C (throttles all processes)\n",
+               stage, kFreqMhz[stage], temp_c);
+    }
+    g_os_cpu_dvfs_stage = stage;
+}
+
+static void os_init_low_power_and_dvfs(void) {
+    // Power-gate unused AI/3D/Video domains on the K230 die that default to ON in pm_core_init()
+    kd_mpi_pm_set_clock(PM_DOMAIN_KPU, K_FALSE);
+    kd_mpi_pm_set_power(PM_DOMAIN_KPU, K_FALSE);
+    kd_mpi_pm_set_clock(PM_DOMAIN_DPU, K_FALSE);
+    kd_mpi_pm_set_power(PM_DOMAIN_DPU, K_FALSE);
+    kd_mpi_pm_set_clock(PM_DOMAIN_VPU, K_FALSE);
+    kd_mpi_pm_set_power(PM_DOMAIN_VPU, K_FALSE);
+
+    // Enable hardware AUTO frequency governor so idle CPU runs at 200 MHz instead of locked 1.6 GHz
+    apply_cpu_dvfs_stage(0, 35.0);
+    printf("[OS-THERMAL] Initialized K230 PM: KPU/DPU/VPU powered off, CPU1 governor = AUTO.\n");
+}
+
+static int compute_target_dvfs_stage(int prev_stage, double temp) {
+    // 6-step progressive hardware clock scaling with 3C hysteresis on step-down recovery
+    if (temp >= 74.0) return 5; // 200 MHz (-87.5% power)
+    if (prev_stage == 5 && temp >= 71.0) return 5;
+    if (temp >= 68.0) return 4; // 400 MHz (-75% power)
+    if (prev_stage >= 4 && temp >= 65.0) return 4;
+    if (temp >= 62.0) return 3; // 594 MHz (-63% power)
+    if (prev_stage >= 3 && temp >= 59.0) return 3;
+    if (temp >= 56.0) return 2; // 800 MHz (-50% power)
+    if (prev_stage >= 2 && temp >= 53.0) return 2;
+    if (temp >= 50.0) return 1; // 1188 MHz (-26% power)
+    if (prev_stage >= 1 && temp >= 47.0) return 1;
+    return 0;                   // AUTO (200 MHz idle <-> on-demand)
+}
+
+static void *os_thermal_guardian_thread(void *arg) {
+    (void)arg;
+    bool fan_on = false;
+    os_init_low_power_and_dvfs();
+    write_os_thermal_state(0, 35.0);
+    while (1) {
+        sleep(3);
+        if (fd_ts <= 0) {
+            fd_ts = open("/dev/ts", O_RDWR);
+            if (fd_ts <= 0) {
+                continue;
+            }
+        }
+        uint32_t buffer[1] = {0};
+        int ret = read(fd_ts, buffer, sizeof(buffer));
+        if (ret <= 0) {
+            continue;
+        }
+        uint32_t ts_val = buffer[0];
+        double code = (double)(ts_val & 0xfff);
+        if (code <= 0.0 || code >= 4095.0) {
+            continue;
+        }
+        double temp = (1e-10 * pow(code, 4) * 1.01472 -
+                       1e-6 * pow(code, 3) * 1.10063 +
+                       4.36150 * 1e-3 * pow(code, 2) -
+                       7.10128 * code + 3565.87);
+        if (temp < -20.0 || temp > 150.0) {
+            continue;
+        }
+
+        // 1. Active fan control on GPIO42 (JP1 Pin 9) with hysteresis (ON >= 45C, OFF < 38C)
+        if (gpio_fd > 0) {
+            pin_gpio_t pin_42;
+            pin_42.pin = 42;
+            if (temp >= 45.0 && !fan_on) {
+                ioctl(gpio_fd, GPIO_WRITE_HIGH, &pin_42);
+                fan_on = true;
+            } else if (temp < 38.0 && fan_on) {
+                ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_42);
+                fan_on = false;
+            }
+        }
+
+        // 2. Progressive hardware CPU1 DVFS throttling (throttles ALL RT-Smart processes in hardware)
+        int next_dvfs = compute_target_dvfs_stage(g_os_cpu_dvfs_stage, temp);
+        apply_cpu_dvfs_stage(next_dvfs, temp);
+
+        // 3. System / Radio thermal state machine (0 = normal, 1 = throttle duty/TX, 2 = emergency cutoff >=82C)
+        int prev_level = g_os_thermal_level;
+        int next_level = prev_level;
+        if (temp >= 82.0) {
+            next_level = 2; // Emergency failsafe cutoff only if >=82C despite 200 MHz CPU throttle
+        } else if (prev_level == 2) {
+            if (temp < 55.0) {
+                next_level = 0;
+            }
+        } else if (temp >= 68.0) {
+            next_level = 1; // Throttle radio TX power (+4 dBm) & duty cycle while keeping app running
+        } else if (prev_level == 1 && temp < 60.0) {
+            next_level = 0;
+        }
+
+        g_os_thermal_level = next_level;
+        write_os_thermal_state(next_level, temp);
+
+        if (next_level != prev_level) {
+            if (next_level == 2) {
+                printf("[OS-THERMAL] EMERGENCY CUTOFF: Die temp %.1f C >= 82 C! Powering down RF rails & pausing UI.\n", temp);
+                if (gpio_fd > 0) {
+                    pin_gpio_t p42 = {.pin = 42};
+                    pin_gpio_t p44 = {.pin = 44};
+                    pin_gpio_t p2  = {.pin = 2};
+                    pin_gpio_t p45 = {.pin = 45};
+                    ioctl(gpio_fd, GPIO_WRITE_HIGH, &p42); // Fan 100%
+                    ioctl(gpio_fd, GPIO_WRITE_LOW, &p44);  // Cut LR2021 radio power
+                    ioctl(gpio_fd, GPIO_WRITE_LOW, &p2);   // Cut nRF9151 power
+                    ioctl(gpio_fd, GPIO_WRITE_LOW, &p45);  // Cut Wi-Fi power
+                }
+            } else if (next_level == 1) {
+                printf("[OS-THERMAL] THROTTLE: Die temp %.1f C >= 68 C — stepping down CPU & radio TX power.\n", temp);
+            } else {
+                printf("[OS-THERMAL] RECOVERY: Die temp cooled to %.1f C — resuming normal operation.\n", temp);
+            }
+        }
+    }
+    return NULL;
+}
 
 #define	GPIO_PE_RISING           _IOW('G', 7, int)
 #define	GPIO_PE_FALLING          _IOW('G', 8, int)
@@ -470,6 +626,10 @@ void user_gui_init()
     ESP_BROOKESIA_CHECK_NULL_EXIT(app_complex_conf, "Create app complex conf failed");
     ESP_BROOKESIA_CHECK_FALSE_EXIT((phone->installApp(app_complex_conf) >= 0), "Install app complex conf failed");
     */
+    SuperLexiconApp *app_superlexicon = new SuperLexiconApp();
+    ESP_BROOKESIA_CHECK_NULL_EXIT(app_superlexicon, "Create app superlexicon failed");
+    ESP_BROOKESIA_CHECK_FALSE_EXIT((phone->installApp(app_superlexicon) >= 0), "Install app superlexicon failed");
+
     PhoneAppSquareline *app_squareline = new PhoneAppSquareline();
     ESP_BROOKESIA_CHECK_NULL_EXIT(app_squareline, "Create app squareline failed");
     ESP_BROOKESIA_CHECK_FALSE_EXIT((phone->installApp(app_squareline) >= 0), "Install app squareline failed");
@@ -814,32 +974,33 @@ printf("check_sum_dc:%d\n",check_sum_dc);
 
 #endif    
    gpio_fd = open("/dev/gpio", O_RDWR);
-    //temperature control fan
-    #if defined(USING_FAN)
-    
-    if (gpio_fd>0)
-    {
+   if (gpio_fd > 0)
+   {
       pin_gpio_t pin_42;
       pin_42.pin = 42;
-      ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_42);  //pin42 output
+      ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_42);  //pin42 fan output
       ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_42);
-      //close(gpio_fd);
-        
-    }  
-    fd_ts = open("/dev/ts", O_RDWR);
-    if (fd_ts<=0)
-    {
-    printf("open /dev/ts fail\n");
-    }
-    
-    #endif 
+   }
+   fd_ts = open("/dev/ts", O_RDWR);
+   if (fd_ts <= 0)
+   {
+      printf("open /dev/ts fail\n");
+   }
+   pthread_t thermal_tid;
+   if (pthread_create(&thermal_tid, NULL, os_thermal_guardian_thread, NULL) == 0) {
+      pthread_detach(thermal_tid);
+   }
 
-//nRF9151 enable 3.3v
+//nRF9151 3.3v: keep OFF unless USING_LTE_GNSS is explicitly enabled to avoid idle modem heat
       fpioa_set_function(2,GPIO2,-1,-1,-1,-1,-1,-1,-1); 
       pin_gpio_t pin_2;
       pin_2.pin = 2;
       ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_2);  //pin2 output
-      ioctl(gpio_fd, GPIO_WRITE_HIGH, &pin_2);//
+      #if defined(USING_LTE_GNSS)
+      ioctl(gpio_fd, GPIO_WRITE_HIGH, &pin_2);
+      #else
+      ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_2);
+      #endif
 
 //close wifi
         pin_gpio_t pin_45;
@@ -1046,15 +1207,25 @@ static int fd_hwtimer1=0;
     #endif
 
 uint8_t reg_data;
+struct timespec last_ts;
+clock_gettime(CLOCK_MONOTONIC, &last_ts);
 while(1)
     {
-    //LV_LOG_TRACE("This is a trace log");
-    //printf("\nlv_timer_handler before\n");
-    lv_tick_inc(1);
-    //lv_timer_handler();
+    if (g_os_thermal_level >= 2) {
+        usleep(250000);
+        clock_gettime(CLOCK_MONOTONIC, &last_ts);
+        continue;
+    }
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    long elapsed_ms = (now_ts.tv_sec - last_ts.tv_sec) * 1000L +
+                      (now_ts.tv_nsec - last_ts.tv_nsec) / 1000000L;
+    if (elapsed_ms > 0) {
+        lv_tick_inc((uint32_t)elapsed_ms);
+        last_ts = now_ts;
+    }
     lv_task_handler();
-    //printf("\nlv_timer_handler after\n");
-    usleep(500);//500
+    usleep(g_os_thermal_level == 1 ? 50000 : 10000);
     }
 	
     return 0;
