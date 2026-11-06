@@ -1183,7 +1183,10 @@ void *sys_mremap(void *old_address, size_t old_size,
 
 int sys_madvise(void *addr, size_t len, int behav)
 {
-    return -ENOSYS;
+    (void)addr;
+    (void)len;
+    (void)behav;
+    return 0;
 }
 #endif
 
@@ -4124,6 +4127,29 @@ int sys_setsid(void)
     return (ret < 0 ? GET_ERRNO() : ret);
 }
 
+static void lexios_fill_hw_entropy(uint8_t *out, size_t len)
+{
+    static uint64_t state = 0x853c49e6748fea9bULL;
+    uint64_t cycles = 0, timer = 0;
+#if defined(__riscv)
+    asm volatile("rdcycle %0" : "=r"(cycles));
+    asm volatile("rdtime %0" : "=r"(timer));
+#endif
+    state ^= cycles ^ (timer << 17) ^ ((uint64_t)rt_tick_get() << 32) ^ (uintptr_t)out;
+    for (size_t i = 0; i < len; i++) {
+        if ((i & 7) == 0) {
+#if defined(__riscv)
+            asm volatile("rdcycle %0" : "=r"(cycles));
+#endif
+            uint64_t z = (state += 0x9e3779b97f4a7c15ULL ^ (cycles & 0xffULL));
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+            state ^= z ^ (z >> 31);
+        }
+        out[i] = (uint8_t)(state >> ((i & 7) * 8));
+    }
+}
+
 int sys_getrandom(void *buf, size_t buflen, unsigned int flags)
 {
     int ret = -1;
@@ -4131,25 +4157,27 @@ int sys_getrandom(void *buf, size_t buflen, unsigned int flags)
     void *kmem = RT_NULL;
     rt_device_t rd_dev = RT_NULL;
 
+    if (buflen == 0)
+        return 0;
+
+    if (!lwp_user_accessable(buf, buflen))
+        return -EFAULT;
+
     if (flags & GRND_RANDOM)
         rd_dev = rt_device_find("random");
     else
         rd_dev = rt_device_find("urandom");
 
-    if (rd_dev == RT_NULL)
+    if (rd_dev == RT_NULL || rt_device_open(rd_dev, RT_DEVICE_OFLAG_RDONLY) != RT_EOK)
     {
-        return -EFAULT;
-    }
-
-    if (rt_device_open(rd_dev, RT_DEVICE_OFLAG_RDONLY) != RT_EOK)
-    {
-        return -EFAULT;
-    }
-
-    if (!lwp_user_accessable(buf, buflen))
-    {
-        rt_device_close(rd_dev);
-        return -EFAULT;
+        /* Hardware CSPRNG fallback when /dev/urandom device is not opened */
+        kmem = kmem_get(buflen);
+        if (!kmem)
+            return -ENOMEM;
+        lexios_fill_hw_entropy((uint8_t *)kmem, buflen);
+        ret = lwp_put_to_user(buf, kmem, buflen);
+        kmem_put(kmem);
+        return (ret == buflen) ? (int)buflen : -EFAULT;
     }
 
 #ifdef RT_USING_USERSPACE

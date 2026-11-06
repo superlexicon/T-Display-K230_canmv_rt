@@ -44,6 +44,8 @@
 #include "app_examples/phone/gnss/Gnss.hpp"
 #include "app_examples/phone/cellular/Cellular.hpp"
 #include "brookesia_app.hpp"
+#include "mpi_vo_api.h"
+#include "k_vo_comm.h"
 #define USING_BLE
 #define USING_WEATHER
 //#define USING_KEYBOARD
@@ -56,6 +58,18 @@ static int gpio_fd = -1;
 static int fd_ts = -1;
 static volatile int g_os_thermal_level = 0; // 0 = normal (<68C), 1 = throttle (68..82C), 2 = emergency cutoff (>=82C)
 static volatile int g_os_cpu_dvfs_stage = -1; // 0=AUTO, 1=1188MHz, 2=800MHz, 3=594MHz, 4=400MHz, 5=200MHz
+static volatile double g_last_die_temp_c = 38.0;
+static volatile bool g_screen_asleep = false;
+static volatile int g_sleep_timeout_sec = 60; // Default 60s inactivity -> Pocket Standby
+static volatile long g_last_activity_sec = 0;
+static volatile long g_boot_time_sec = 0;
+
+extern "C" void disp_enable_update(void);
+extern "C" void disp_disable_update(void);
+extern k_u8 *pic_addr;
+extern k_video_frame_info vf_info;
+extern k_vo_osd osd_vo;
+
 #include <fcntl.h>
 #include <time.h>
 #include <sys/ioctl.h>
@@ -68,6 +82,13 @@ static volatile int g_os_cpu_dvfs_stage = -1; // 0=AUTO, 1=1188MHz, 2=800MHz, 3=
 #define	GPIO_DM_INPUT_PULL_DOWN  _IOW('G', 3, int)
 #define	GPIO_WRITE_LOW           _IOW('G', 4, int)
 #define	GPIO_WRITE_HIGH          _IOW('G', 5, int)
+#define	GPIO_READ_VALUE          _IOW('G', 12, int)
+
+static long monotonic_sec_now(void) {
+    struct timespec ts = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec;
+}
 
 static void write_os_thermal_state(int level, double temp_c) {
     struct timespec ts = {0, 0};
@@ -129,6 +150,53 @@ static int compute_target_dvfs_stage(int prev_stage, double temp) {
     return 0;                   // AUTO (200 MHz idle <-> on-demand)
 }
 
+extern "C" bool lexios_is_screen_asleep(void) {
+    return g_screen_asleep;
+}
+
+extern "C" void lexios_notify_user_activity(void) {
+    g_last_activity_sec = monotonic_sec_now();
+}
+
+extern "C" void lexios_set_screen_sleep(bool sleep_mode) {
+    if (sleep_mode == g_screen_asleep) {
+        return;
+    }
+    g_screen_asleep = sleep_mode;
+    if (sleep_mode) {
+        printf("[OS-THERMAL] Entering Pocket Standby: Blank RM69A10 AMOLED (GPIO25 LOW) + CPU1 -> 200 MHz Profile 5\n");
+        disp_disable_update();
+        if (pic_addr != NULL) {
+            memset(pic_addr, 0, 568 * 1232 * 4);
+            kd_mpi_vo_chn_insert_frame(osd_vo + 3, &vf_info);
+        }
+        kd_mpi_vo_osd_disable(osd_vo);
+        if (gpio_fd > 0) {
+            pin_gpio_t pin_25;
+            pin_25.pin = 25;
+            ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_25);
+            ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_25);
+        }
+        apply_cpu_dvfs_stage(5, g_last_die_temp_c);
+    } else {
+        lexios_notify_user_activity();
+        int target_stage = compute_target_dvfs_stage(0, g_last_die_temp_c);
+        apply_cpu_dvfs_stage(target_stage, g_last_die_temp_c);
+        if (gpio_fd > 0) {
+            pin_gpio_t pin_25;
+            pin_25.pin = 25;
+            ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_25);
+            ioctl(gpio_fd, GPIO_WRITE_HIGH, &pin_25);
+        }
+        kd_mpi_vo_osd_enable(osd_vo);
+        disp_enable_update();
+        if (lv_scr_act() != NULL) {
+            lv_obj_invalidate(lv_scr_act());
+        }
+        printf("[OS-THERMAL] Woke from Pocket Standby: AMOLED ON (GPIO25 HIGH), CPU1 stage %d\n", target_stage);
+    }
+}
+
 static void *os_thermal_guardian_thread(void *arg) {
     (void)arg;
     bool fan_on = false;
@@ -159,6 +227,7 @@ static void *os_thermal_guardian_thread(void *arg) {
         if (temp < -20.0 || temp > 150.0) {
             continue;
         }
+        g_last_die_temp_c = temp;
 
         // 1. Active fan control on GPIO42 (JP1 Pin 9) with hysteresis (ON >= 45C, OFF < 38C)
         if (gpio_fd > 0) {
@@ -174,8 +243,12 @@ static void *os_thermal_guardian_thread(void *arg) {
         }
 
         // 2. Progressive hardware CPU1 DVFS throttling (throttles ALL RT-Smart processes in hardware)
-        int next_dvfs = compute_target_dvfs_stage(g_os_cpu_dvfs_stage, temp);
-        apply_cpu_dvfs_stage(next_dvfs, temp);
+        if (!g_screen_asleep) {
+            int next_dvfs = compute_target_dvfs_stage(g_os_cpu_dvfs_stage, temp);
+            apply_cpu_dvfs_stage(next_dvfs, temp);
+        } else {
+            apply_cpu_dvfs_stage(5, temp);
+        }
 
         // 3. System / Radio thermal state machine (0 = normal, 1 = throttle duty/TX, 2 = emergency cutoff >=82C)
         int prev_level = g_os_thermal_level;
@@ -973,6 +1046,9 @@ printf("check_sum_dc:%d\n",check_sum_dc);
   printf("++++++++++++++++++++++++++++++++++++++++++++++++\n");  
 
 #endif    
+   g_boot_time_sec = monotonic_sec_now();
+   g_last_activity_sec = g_boot_time_sec;
+
    gpio_fd = open("/dev/gpio", O_RDWR);
    if (gpio_fd > 0)
    {
@@ -980,6 +1056,12 @@ printf("check_sum_dc:%d\n",check_sum_dc);
       pin_42.pin = 42;
       ioctl(gpio_fd, GPIO_DM_OUTPUT, &pin_42);  //pin42 fan output
       ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_42);
+
+      // Configure GPIO0 (BOOT0 button) as input for Pocket Standby toggle
+      fpioa_set_function(0, GPIO0, 1, 0, 0, 0, -1, 1, -1);
+      pin_gpio_t pin_0;
+      pin_0.pin = 0;
+      ioctl(gpio_fd, GPIO_DM_INPUT, &pin_0);
    }
    fd_ts = open("/dev/ts", O_RDWR);
    if (fd_ts <= 0)
@@ -1209,6 +1291,18 @@ static int fd_hwtimer1=0;
 uint8_t reg_data;
 struct timespec last_ts;
 clock_gettime(CLOCK_MONOTONIC, &last_ts);
+
+unsigned short boot0_idle_val = 0;
+bool boot0_valid = false;
+int boot0_press_cnt = 0;
+if (gpio_fd > 0) {
+    pin_gpio_t p0 = {.pin = 0, .val = 0};
+    if (ioctl(gpio_fd, GPIO_READ_VALUE, &p0) == 0) {
+        boot0_idle_val = p0.val;
+        boot0_valid = true;
+    }
+}
+
 while(1)
     {
     if (g_os_thermal_level >= 2) {
@@ -1218,6 +1312,29 @@ while(1)
     }
     struct timespec now_ts;
     clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+    // Poll BOOT0 (GPIO0) hardware button for Pocket Standby toggle
+    if (boot0_valid && gpio_fd > 0) {
+        pin_gpio_t p0 = {.pin = 0, .val = boot0_idle_val};
+        if (ioctl(gpio_fd, GPIO_READ_VALUE, &p0) == 0) {
+            if (p0.val != boot0_idle_val) {
+                boot0_press_cnt++;
+                if (boot0_press_cnt == 2) {
+                    lexios_set_screen_sleep(!lexios_is_screen_asleep());
+                }
+            } else {
+                boot0_press_cnt = 0;
+            }
+        }
+    }
+
+    // Check touch inactivity timeout for automatic Pocket Standby
+    if (!g_screen_asleep && g_sleep_timeout_sec > 0) {
+        if ((now_ts.tv_sec - g_last_activity_sec) >= g_sleep_timeout_sec) {
+            lexios_set_screen_sleep(true);
+        }
+    }
+
     long elapsed_ms = (now_ts.tv_sec - last_ts.tv_sec) * 1000L +
                       (now_ts.tv_nsec - last_ts.tv_nsec) / 1000000L;
     if (elapsed_ms > 0) {
@@ -1225,7 +1342,11 @@ while(1)
         last_ts = now_ts;
     }
     lv_task_handler();
-    usleep(g_os_thermal_level == 1 ? 50000 : 10000);
+    if (g_screen_asleep) {
+        usleep(80000); // 80ms low-power poll interval during Pocket Standby
+    } else {
+        usleep(g_os_thermal_level == 1 ? 50000 : 10000);
+    }
     }
 	
     return 0;

@@ -360,23 +360,27 @@ rt_base_t lwp_brk(void *addr)
 }
 
 #define MAP_ANONYMOUS  0x20
+#ifndef PROT_EXEC
+#define PROT_EXEC      0x04
+#endif
 
 void* lwp_mmap2(void *addr, size_t length, int prot,
         int flags, int fd, off_t pgoffset)
 {
     void *ret = (void *)-1;
+    int is_exec = (prot & PROT_EXEC) ? 1 : 0;
 
     if (fd == -1)
     {
         rt_mm_lock();
         if (length == 0x1b0||length == 0xb70)  /* TODO: workround for tls bug, by aozima, need fix asap. */
         {
-            ret = lwp_map_user(lwp_self(), addr, length + ARCH_PAGE_SIZE, 0);
+            ret = lwp_map_user(lwp_self(), addr, length + ARCH_PAGE_SIZE, is_exec);
             ret += ARCH_PAGE_SIZE;
         }
         else
         {
-            ret = lwp_map_user(lwp_self(), addr, length, 0);
+            ret = lwp_map_user(lwp_self(), addr, length, is_exec);
         }
         rt_mm_unlock();
 
@@ -385,6 +389,12 @@ void* lwp_mmap2(void *addr, size_t length, int prot,
             if ((flags & MAP_ANONYMOUS) != 0)
             {
                 rt_memset(ret, 0, length);
+            }
+            if (is_exec)
+            {
+#if defined(__riscv)
+                asm volatile("fence rw, rw; fence.i" ::: "memory");
+#endif
             }
         }
         else

@@ -9,7 +9,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <pthread.h>
-#include <rtthread.h>
+//#include <rtthread.h>
 //#include <rtdevice.h>
 #include <poll.h>
 #include "fpioa/rt_fpioa.h"
@@ -264,6 +264,11 @@ void tca8418_init()
 	}
 
 }
+bool tca8418_is_connected()
+{
+    return fd_keyboard > 0;
+}
+
 uint32_t tca8418_get_key()
 {
     if(fd_keyboard<=0)

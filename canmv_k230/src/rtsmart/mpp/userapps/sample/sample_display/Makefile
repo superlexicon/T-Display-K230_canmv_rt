@@ -29,8 +29,8 @@ CXX_FLAGS_AI = -std=c++20 \
 
 include $(LOCAL_SRC_DIR)/lvgl/lvgl.mk
 include $(LOCAL_SRC_DIR)/ui_brookesia/ui_brookesia.mk
-K230_UI_DIR ?= /home/mano/Projects/k230-device-ui
-LOCAL_CFLAGS = -I$(LOCAL_SRC_DIR) -I$(LOCAL_SRC_DIR)/lvgl -I$(K230_UI_DIR)/src -I$(K230_UI_DIR)/vendor/cjson
+SUPERLEXICON_DIR ?= /home/mano/Projects/superlexicon
+LOCAL_CFLAGS = -I$(LOCAL_SRC_DIR) -I$(LOCAL_SRC_DIR)/lvgl -I$(SUPERLEXICON_DIR)/shell/vendor/dashboard -I$(SUPERLEXICON_DIR)/shell/vendor/cjson
 SRCS = $(wildcard $(LOCAL_SRC_DIR)/*.c)
 #SRCS+=$(LVGL_CSRCS)
 #SRCS+= $(wildcard $(LOCAL_SRC_DIR)/port/*.c)
@@ -44,19 +44,20 @@ SRCS_C += $(wildcard $(LOCAL_SRC_DIR)/audio/*.c)
 SRCS_C += $(wildcard $(LOCAL_SRC_DIR)/network/*.c)
 SRCS_C += $(wildcard $(LOCAL_SRC_DIR)/fpioa/*.c)
 SRCS_C += $(BROOKESIA_CSRCS)
-SRCS_C += $(K230_UI_DIR)/src/ui/dashboard.c \
-          $(K230_UI_DIR)/src/ui/logo_horizontal.c \
-          $(K230_UI_DIR)/src/ui/app_icon.c \
-          $(K230_UI_DIR)/src/ws.c \
-          $(K230_UI_DIR)/src/fonts/outfit_28.c \
-          $(K230_UI_DIR)/src/fonts/outfit_16.c \
-          $(K230_UI_DIR)/src/fonts/jbm_13.c \
-          $(K230_UI_DIR)/src/fonts/jbm_15.c \
-          $(K230_UI_DIR)/vendor/cjson/cJSON.c
+SRCS_C += $(SUPERLEXICON_DIR)/shell/vendor/dashboard/ui/dashboard.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/ui/superapp_views.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/ui/logo_horizontal.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/ui/app_icon.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/ws.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/fonts/outfit_28.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/fonts/outfit_16.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/fonts/jbm_13.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/dashboard/fonts/jbm_15.c \
+          $(SUPERLEXICON_DIR)/shell/vendor/cjson/cJSON.c
 
 SRCS_CXX += $(wildcard $(LOCAL_SRC_DIR)/*.cpp)
 SRCS_CXX += $(BROOKESIA_CXXSRCS)
-SRCS_CXX += $(K230_UI_DIR)/src/brookesia_app.cpp
+SRCS_CXX += $(SUPERLEXICON_DIR)/shell/vendor/dashboard/brookesia_app.cpp
 
 
 
