@@ -990,9 +990,93 @@ extern "C" void lexios_navigate_recents(void) {
     }
 }
 
+static void find_best_scrollable_obj(lv_obj_t *node, lv_coord_t dx, lv_coord_t dy,
+                                     lv_obj_t **best_can, int *best_can_area,
+                                     lv_obj_t **best_any, int *best_any_area) {
+    if (!node || lv_obj_has_flag(node, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+    if (lv_obj_has_flag(node, LV_OBJ_FLAG_SCROLLABLE) && !lv_obj_check_type(node, &lv_textarea_class)) {
+        int area = (int)lv_obj_get_width(node) * (int)lv_obj_get_height(node);
+        lv_dir_t dir = lv_obj_get_scroll_dir(node);
+        if (dy != 0 && (dir & LV_DIR_VER)) {
+            lv_coord_t can_px = (dy > 0) ? lv_obj_get_scroll_top(node) : lv_obj_get_scroll_bottom(node);
+            lv_coord_t tot_px = lv_obj_get_scroll_top(node) + lv_obj_get_scroll_bottom(node);
+            if (can_px > 2 && area > *best_can_area) {
+                *best_can_area = area;
+                *best_can = node;
+            }
+            if (tot_px > 2 && area > *best_any_area) {
+                *best_any_area = area;
+                *best_any = node;
+            }
+        } else if (dx != 0 && (dir & LV_DIR_HOR)) {
+            lv_coord_t can_px = (dx > 0) ? lv_obj_get_scroll_left(node) : lv_obj_get_scroll_right(node);
+            lv_coord_t tot_px = lv_obj_get_scroll_left(node) + lv_obj_get_scroll_right(node);
+            if (can_px > 2 && area > *best_can_area) {
+                *best_can_area = area;
+                *best_can = node;
+            }
+            if (tot_px > 2 && area > *best_any_area) {
+                *best_any_area = area;
+                *best_any = node;
+            }
+        }
+    }
+    uint32_t cnt = lv_obj_get_child_cnt(node);
+    for (uint32_t i = 0; i < cnt; i++) {
+        find_best_scrollable_obj(lv_obj_get_child(node, i), dx, dy, best_can, best_can_area, best_any, best_any_area);
+    }
+}
+
 extern "C" bool lexios_handle_recents_key(uint32_t key) {
     if (g_phone_instance != nullptr) {
-        return g_phone_instance->getManager().handleRecentsScreenKey(key);
+        if (g_phone_instance->getManager().handleRecentsScreenKey(key)) {
+            return true;
+        }
+    }
+    if (key != LV_KEY_UP && key != LV_KEY_DOWN && key != LV_KEY_LEFT && key != LV_KEY_RIGHT) {
+        return false;
+    }
+    lv_obj_t *scr = lv_scr_act();
+    if (!scr) {
+        return false;
+    }
+    /* If Left/Right is pressed while editing a non-empty visible textarea, let LVGL move the text cursor */
+    if (key == LV_KEY_LEFT || key == LV_KEY_RIGHT) {
+        lv_group_t *grp = lv_group_get_default();
+        lv_obj_t *focused = grp ? lv_group_get_focused(grp) : nullptr;
+        if (focused && lv_obj_get_screen(focused) == scr &&
+            !lv_obj_has_flag(focused, LV_OBJ_FLAG_HIDDEN) &&
+            lv_obj_check_type(focused, &lv_textarea_class)) {
+            const char *txt = lv_textarea_get_text(focused);
+            if (txt && txt[0] != '\0') {
+                return false;
+            }
+        }
+    }
+
+    lv_obj_update_layout(scr);
+    if (key == LV_KEY_LEFT || key == LV_KEY_RIGHT) {
+        lv_coord_t dx = (key == LV_KEY_LEFT) ? 180 : -180;
+        lv_obj_t *best_can = nullptr, *best_any = nullptr;
+        int can_area = 0, any_area = 0;
+        find_best_scrollable_obj(scr, dx, 0, &best_can, &can_area, &best_any, &any_area);
+        lv_obj_t *h_target = best_can ? best_can : best_any;
+        if (h_target) {
+            lv_obj_scroll_by_bounded(h_target, dx, 0, LV_ANIM_ON);
+            return true;
+        }
+    }
+
+    lv_coord_t dy = (key == LV_KEY_UP || key == LV_KEY_LEFT) ? 150 : -150;
+    lv_obj_t *best_can = nullptr, *best_any = nullptr;
+    int can_area = 0, any_area = 0;
+    find_best_scrollable_obj(scr, 0, dy, &best_can, &can_area, &best_any, &any_area);
+    lv_obj_t *v_target = best_can ? best_can : best_any;
+    if (v_target) {
+        lv_obj_scroll_by_bounded(v_target, 0, dy, LV_ANIM_ON);
+        return true;
     }
     return false;
 }

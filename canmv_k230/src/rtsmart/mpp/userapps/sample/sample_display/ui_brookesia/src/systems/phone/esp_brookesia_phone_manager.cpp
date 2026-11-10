@@ -1234,14 +1234,24 @@ bool ESP_Brookesia_PhoneManager::handleRecentsScreenKey(uint32_t key)
 {
     ESP_Brookesia_RecentsScreen *recents_screen = home._recents_screen.get();
     if (recents_screen == nullptr || !recents_screen->checkVisible()) {
+        if (getActiveApp() == nullptr) {
+            if (key == LV_KEY_LEFT || key == LV_KEY_UP) {
+                home._app_launcher.scrollToLeftPage();
+                return true;
+            }
+            if (key == LV_KEY_RIGHT || key == LV_KEY_DOWN) {
+                home._app_launcher.scrollToRightPage();
+                return true;
+            }
+        }
         return false;
     }
 
-    if (key == LV_KEY_LEFT) {
+    if (key == LV_KEY_LEFT || key == LV_KEY_UP) {
         processRecentsScreenMoveRight();
         return true;
     }
-    if (key == LV_KEY_RIGHT) {
+    if (key == LV_KEY_RIGHT || key == LV_KEY_DOWN) {
         processRecentsScreenMoveLeft();
         return true;
     }

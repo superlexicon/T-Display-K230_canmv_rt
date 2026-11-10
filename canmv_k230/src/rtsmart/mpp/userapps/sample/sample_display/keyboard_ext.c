@@ -321,8 +321,15 @@ bool tca8418_poll_presence(void)
 
 uint32_t tca8418_get_key()
 {
+    static uint32_t s_held_repeat_key = 0;
+    static int s_held_code_index = 0;
+    static int s_held_polls = 0;
+
     if(fd_keyboard<=0)
      {
+        s_held_repeat_key = 0;
+        s_held_code_index = 0;
+        s_held_polls = 0;
         return 0;
      }
    uint32_t key_code=0x00;
@@ -380,6 +387,13 @@ uint32_t tca8418_get_key()
              key_code=tca8418_keyboard_lvgl[code_index-1];
        }
      }
+     if (key_code == LV_KEY_UP || key_code == LV_KEY_DOWN ||
+         key_code == LV_KEY_LEFT || key_code == LV_KEY_RIGHT ||
+         key_code == LV_KEY_BACKSPACE) {
+         s_held_repeat_key = key_code;
+         s_held_code_index = code_index;
+         s_held_polls = 0;
+     }
      }
      else//flag_press==0
      {
@@ -388,9 +402,15 @@ uint32_t tca8418_get_key()
      {
      flag_press_shift=0;
      }
-     if(code_index==3||code_index==9)//fn
+     else if(code_index==3||code_index==9)//fn
      {
      flag_press_fn=0;
+     }
+     else if (code_index == s_held_code_index || s_held_repeat_key != 0)
+     {
+     s_held_repeat_key = 0;
+     s_held_code_index = 0;
+     s_held_polls = 0;
      }
      
      
@@ -404,6 +424,16 @@ uint32_t tca8418_get_key()
     tca8418_write_reg(fd_keyboard, 0x02,reg_data);//
     }
     
+    if (key_code == 0 && s_held_repeat_key != 0) {
+        s_held_polls++;
+        if (s_held_polls > 120) {
+            s_held_repeat_key = 0;
+            s_held_code_index = 0;
+            s_held_polls = 0;
+        } else if (s_held_polls >= 10 && ((s_held_polls - 10) % 3 == 0)) {
+            key_code = s_held_repeat_key;
+        }
+    }
     
     return key_code;
 
