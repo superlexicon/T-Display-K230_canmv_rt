@@ -15,6 +15,8 @@
 
 #include <stdlib.h>
 
+extern bool tca8418_is_connected(void);
+
 /*********************
  *      DEFINES
  *********************/
@@ -171,6 +173,10 @@ void lv_keyboard_set_textarea(lv_obj_t * obj, lv_obj_t * ta)
     if(keyboard->ta) {
         lv_obj_add_flag(obj, LV_STATE_FOCUSED);
     }
+
+    if(tca8418_is_connected()) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /**
@@ -186,6 +192,10 @@ void lv_keyboard_set_mode(lv_obj_t * obj, lv_keyboard_mode_t mode)
 
     keyboard->mode = mode;
     lv_keyboard_update_map(obj);
+
+    if(tca8418_is_connected()) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /**
@@ -218,6 +228,10 @@ void lv_keyboard_set_map(lv_obj_t * obj, lv_keyboard_mode_t mode, const char * m
     kb_map[mode] = map;
     kb_ctrl[mode] = ctrl_map;
     lv_keyboard_update_map(obj);
+
+    if(tca8418_is_connected()) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /*=====================
@@ -385,6 +399,10 @@ static void lv_keyboard_constructor(const lv_obj_class_t * class_p, lv_obj_t * o
     lv_obj_set_style_base_dir(obj, LV_BASE_DIR_LTR, 0);
 
     lv_keyboard_update_map(obj);
+
+    if(tca8418_is_connected()) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /**

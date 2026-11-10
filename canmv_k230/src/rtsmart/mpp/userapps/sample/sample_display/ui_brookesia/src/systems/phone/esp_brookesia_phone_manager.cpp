@@ -583,10 +583,23 @@ bool ESP_Brookesia_PhoneManager::processNavigationEvent(ESP_Brookesia_CoreNaviga
             ESP_BROOKESIA_LOGE("Hide recents_screen failed");
             ret = false;
         }
-        // Directly return if the type is not home
-        if (type != ESP_BROOKESIA_CORE_NAVIGATE_TYPE_HOME) {
+        if (type == ESP_BROOKESIA_CORE_NAVIGATE_TYPE_HOME) {
+            _recents_screen_pause_app = nullptr;
+            ESP_BROOKESIA_CHECK_FALSE_RETURN(processHomeScreenChange(ESP_BROOKESIA_PHONE_MANAGER_SCREEN_MAIN, nullptr), false,
+                                             "Process screen change failed");
+            resetActiveApp();
             return ret;
         }
+        if (_recents_screen_pause_app != nullptr && getRunningAppIndexByApp(_recents_screen_pause_app) >= 0) {
+            ESP_Brookesia_CoreApp *resume_app = _recents_screen_pause_app;
+            _recents_screen_pause_app = nullptr;
+            processAppResume(resume_app);
+        } else {
+            _recents_screen_pause_app = nullptr;
+            processHomeScreenChange(ESP_BROOKESIA_PHONE_MANAGER_SCREEN_MAIN, nullptr);
+            resetActiveApp();
+        }
+        return ret;
     }
 
     switch (type) {
@@ -1215,4 +1228,65 @@ void ESP_Brookesia_PhoneManager::onRecentsScreenSnapshotDeletedEventCallback(lv_
             ESP_BROOKESIA_CHECK_FALSE_EXIT(manager->processRecentsScreenHide(), "Manager hide recents_screen failed");
         }
     }
+}
+
+bool ESP_Brookesia_PhoneManager::handleRecentsScreenKey(uint32_t key)
+{
+    ESP_Brookesia_RecentsScreen *recents_screen = home._recents_screen.get();
+    if (recents_screen == nullptr || !recents_screen->checkVisible()) {
+        return false;
+    }
+
+    if (key == LV_KEY_LEFT) {
+        processRecentsScreenMoveRight();
+        return true;
+    }
+    if (key == LV_KEY_RIGHT) {
+        processRecentsScreenMoveLeft();
+        return true;
+    }
+    if (key == LV_KEY_ENTER) {
+        if (_recents_screen_active_app != nullptr) {
+            int target_id = _recents_screen_active_app->getId();
+            _recents_screen_pause_app = nullptr;
+            processRecentsScreenHide();
+            ESP_Brookesia_CoreAppEventData_t app_event_data = {
+                .id = target_id,
+                .type = ESP_BROOKESIA_CORE_APP_EVENT_TYPE_START,
+                .data = nullptr
+            };
+            _core.sendAppEvent(&app_event_data);
+        } else {
+            _recents_screen_pause_app = nullptr;
+            processRecentsScreenHide();
+            processHomeScreenChange(ESP_BROOKESIA_PHONE_MANAGER_SCREEN_MAIN, nullptr);
+            resetActiveApp();
+        }
+        return true;
+    }
+    if (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) {
+        if (_recents_screen_active_app != nullptr) {
+            int target_id = _recents_screen_active_app->getId();
+            int next_idx = max(getRunningAppIndexById(target_id) - 1, 0);
+            if (_recents_screen_pause_app == _recents_screen_active_app) {
+                _recents_screen_pause_app = nullptr;
+            }
+            ESP_Brookesia_CoreAppEventData_t app_event_data = {
+                .id = target_id,
+                .type = ESP_BROOKESIA_CORE_APP_EVENT_TYPE_STOP,
+                .data = nullptr
+            };
+            _core.sendAppEvent(&app_event_data);
+            _recents_screen_active_app = getRunningAppByIdenx(next_idx);
+            if (_recents_screen_active_app != nullptr) {
+                recents_screen->scrollToSnapshotByIndex(next_idx);
+            } else if (data.flags.enable_recents_screen_hide_when_no_snapshot) {
+                processRecentsScreenHide();
+                processHomeScreenChange(ESP_BROOKESIA_PHONE_MANAGER_SCREEN_MAIN, nullptr);
+                resetActiveApp();
+            }
+        }
+        return true;
+    }
+    return false;
 }

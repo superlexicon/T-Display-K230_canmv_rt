@@ -272,9 +272,18 @@ void lv_obj_add_flag(lv_obj_t * obj, lv_obj_flag_t f)
     }
 }
 
+extern bool tca8418_is_connected(void);
+extern const lv_obj_class_t lv_keyboard_class;
+
 void lv_obj_clear_flag(lv_obj_t * obj, lv_obj_flag_t f)
 {
     LV_ASSERT_OBJ(obj, MY_CLASS);
+
+    if((f & LV_OBJ_FLAG_HIDDEN) && obj->class_p == &lv_keyboard_class && tca8418_is_connected()) {
+        f = (lv_obj_flag_t)(f & (~LV_OBJ_FLAG_HIDDEN));
+        obj->flags |= LV_OBJ_FLAG_HIDDEN;
+        if(f == 0) return;
+    }
 
     bool was_on_layout = lv_obj_is_layout_positioned(obj);
     if(f & LV_OBJ_FLAG_SCROLLABLE) {

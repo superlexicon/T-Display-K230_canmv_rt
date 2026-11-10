@@ -556,6 +556,7 @@ bool LexiChatApp::run(void)
     lv_obj_align(g_chat_input_ta, LV_ALIGN_TOP_LEFT, 16, 510);
     lv_textarea_set_one_line(g_chat_input_ta, true);
     lv_textarea_set_placeholder_text(g_chat_input_ta, "Type mesh message...");
+    lv_obj_add_event_cb(g_chat_input_ta, on_chat_send_cb, LV_EVENT_READY, nullptr);
     if (lv_group_get_default() != nullptr) {
         lv_group_add_obj(lv_group_get_default(), g_chat_input_ta);
         lv_group_focus_obj(g_chat_input_ta);
@@ -569,6 +570,9 @@ bool LexiChatApp::run(void)
     lv_obj_set_size(kb, w, 320);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(kb, g_chat_input_ta);
+    if (tca8418_is_connected()) {
+        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    }
 
     update_chat_status();
     _poll_timer = lv_timer_create(chat_poll_timer_cb, 2000, nullptr);
@@ -1313,6 +1317,7 @@ bool LexiSatApp::run(void)
     lv_obj_align(g_sat_input_ta, LV_ALIGN_TOP_LEFT, 16, 512);
     lv_textarea_set_one_line(g_sat_input_ta, true);
     lv_textarea_set_placeholder_text(g_sat_input_ta, "AT command or Sat NTN payload...");
+    lv_obj_add_event_cb(g_sat_input_ta, on_sat_send_at_cb, LV_EVENT_READY, nullptr);
     if (lv_group_get_default() != nullptr) {
         lv_group_add_obj(lv_group_get_default(), g_sat_input_ta);
         lv_group_focus_obj(g_sat_input_ta);
@@ -1326,6 +1331,9 @@ bool LexiSatApp::run(void)
     lv_obj_set_size(kb, w, 310);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(kb, g_sat_input_ta);
+    if (tca8418_is_connected()) {
+        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    }
 
     refresh_lexisat_ui();
     _sat_timer = lv_timer_create(sat_timer_cb, 1000, nullptr);

@@ -955,6 +955,48 @@ extern "C" void lexios_cycle_rotation_mode(void) {
     apply_effective_rotation();
 }
 
+static void sync_software_keyboards_visibility(lv_obj_t *obj, bool hw_kb_attached) {
+    if (!obj) return;
+    if (lv_obj_check_type(obj, &lv_keyboard_class)) {
+        if (hw_kb_attached) {
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    uint32_t cnt = lv_obj_get_child_cnt(obj);
+    for (uint32_t i = 0; i < cnt; i++) {
+        sync_software_keyboards_visibility(lv_obj_get_child(obj, i), hw_kb_attached);
+    }
+}
+
+extern "C" void lexios_navigate_home(void) {
+    if (g_qs_open) {
+        lexios_toggle_quick_settings();
+    }
+    if (g_phone_instance != nullptr) {
+        printf("[OS-NAV] Physical LilyGO key -> Navigate Home Screen\n");
+        g_phone_instance->getManager().processNavigationEvent(ESP_BROOKESIA_CORE_NAVIGATE_TYPE_HOME);
+    }
+}
+
+extern "C" void lexios_navigate_recents(void) {
+    if (g_qs_open) {
+        lexios_toggle_quick_settings();
+    }
+    if (g_phone_instance != nullptr) {
+        printf("[OS-NAV] Physical ESC key -> Toggle App Switcher / Terminator\n");
+        g_phone_instance->getManager().processNavigationEvent(ESP_BROOKESIA_CORE_NAVIGATE_TYPE_RECENTS_SCREEN);
+    }
+}
+
+extern "C" bool lexios_handle_recents_key(uint32_t key) {
+    if (g_phone_instance != nullptr) {
+        return g_phone_instance->getManager().handleRecentsScreenKey(key);
+    }
+    return false;
+}
+
 static void on_qs_pill_clicked(lv_event_t *e) {
     (void)e;
     lexios_toggle_quick_settings();
@@ -1585,6 +1627,9 @@ static void on_clock_update_timer_cb(struct _lv_timer_t *t)
         }
         if (prev_kb != now_kb || g_applied_hw_rot < 0) {
             apply_effective_rotation();
+            if (lv_scr_act()) {
+                sync_software_keyboards_visibility(lv_scr_act(), now_kb);
+            }
         } else if (g_qs_open) {
             qs_refresh_ui();
         }
@@ -1862,10 +1907,6 @@ void user_gui_init()
     SuperLexiconApp *app_superlexicon = new SuperLexiconApp();
     ESP_BROOKESIA_CHECK_NULL_EXIT(app_superlexicon, "Create app superlexicon failed");
     ESP_BROOKESIA_CHECK_FALSE_EXIT((phone->installApp(app_superlexicon) >= 0), "Install app superlexicon failed");
-
-    LexiSystemApp *app_lexisystem = new LexiSystemApp();
-    ESP_BROOKESIA_CHECK_NULL_EXIT(app_lexisystem, "Create app lexisystem failed");
-    ESP_BROOKESIA_CHECK_FALSE_EXIT((phone->installApp(app_lexisystem) >= 0), "Install app lexisystem failed");
 
     LexiSatApp *app_lexisat = new LexiSatApp();
     ESP_BROOKESIA_CHECK_NULL_EXIT(app_lexisat, "Create app lexisat failed");

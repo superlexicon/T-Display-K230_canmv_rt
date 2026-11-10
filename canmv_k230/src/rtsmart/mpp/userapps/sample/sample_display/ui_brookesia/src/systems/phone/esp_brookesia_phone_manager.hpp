@@ -22,6 +22,8 @@ public:
 
     bool checkInitialized(void) const   { return _flags.is_initialized; }
     ESP_Brookesia_Gesture *getGesture(void)    { return _gesture.get(); }
+    bool processNavigationEvent(ESP_Brookesia_CoreNavigateType_t type) override;
+    bool handleRecentsScreenKey(uint32_t key);
 
     static bool calibrateData(const ESP_Brookesia_StyleSize_t screen_size, ESP_Brookesia_PhoneHome &home,
                               ESP_Brookesia_PhoneManagerData_t &data);
@@ -34,7 +36,6 @@ private:
     bool processAppRunExtra(ESP_Brookesia_CoreApp *app) override;
     bool processAppResumeExtra(ESP_Brookesia_CoreApp *app) override;
     bool processAppCloseExtra(ESP_Brookesia_CoreApp *app) override;
-    bool processNavigationEvent(ESP_Brookesia_CoreNavigateType_t type) override;
     // Main
     bool begin(void);
     bool del(void);

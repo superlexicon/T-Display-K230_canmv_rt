@@ -253,6 +253,9 @@ extern void lexios_notify_user_activity(void);
 extern int lexios_get_display_rotation(void);
 extern void lexios_toggle_quick_settings(void);
 extern void lexios_cycle_rotation_mode(void);
+extern void lexios_navigate_home(void);
+extern void lexios_navigate_recents(void);
+extern bool lexios_handle_recents_key(uint32_t key);
 
 /*Return true is the touchpad is pressed*/
 static bool touchpad_is_pressed(void)
@@ -339,42 +342,56 @@ static void keypad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
 
         /*Translate the keys to LVGL control characters according to your key definitions*/
         switch(act_key) {
-            case 1:
-                act_key = LV_KEY_NEXT;
-                break;
-            case 2:
-                act_key = LV_KEY_PREV;
-                break;
-            case 3:
-                act_key = LV_KEY_LEFT;
-                break;
-            case 4:
-                act_key = LV_KEY_RIGHT;
-                break;
-            case 5:
-                act_key = LV_KEY_ENTER;
-                break;
+            case LV_KEY_ESC:
+            case 0x81:
+                /* ESC key -> Activate/Toggle App Switcher & Terminator (Recents Screen) */
+                lexios_navigate_recents();
+                flag_press_fn = 0;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
+            case 0x8F:
+            case 0xA2:
+            case 0x91:
+            case 0x8C:
+            case 0x8D:
+                /* LilyGO button -> Navigate to Home Screen */
+                lexios_navigate_home();
+                flag_press_fn = 0;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 0x83:
-            	break;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 0x84:
-            	if(flag_press_fn==1)
-            	{
+                if(flag_press_fn==1)
+                {
                  control_keyboard_backlight(20000,0);
                  flag_press_fn=0;
                 }
-            	break;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 0x85:
                 if(flag_press_fn==1)
-            	{
+                {
                  control_keyboard_backlight(20000,5);
                  flag_press_fn=0;
                 }
-            	break;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 0x86:
-            	break;     
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 0x8B:
                 control_keyboard_indicator_led_caps_lock(flag_press_caps_lock);
-                break;
+                data->state = LV_INDEV_STATE_REL;
+                data->key = 0;
+                return;
             case 'r':
             case 'R':
                 if (flag_press_fn == 1) {
@@ -407,7 +424,19 @@ static void keypad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
                 break;
             default:
                 break;
-            
+        }
+
+        if (act_key >= 0x80) {
+            /* Consume any unmapped function/modifier keycode so it is never typed into textareas */
+            data->state = LV_INDEV_STATE_REL;
+            data->key = 0;
+            return;
+        }
+
+        if (lexios_handle_recents_key(act_key)) {
+            data->state = LV_INDEV_STATE_REL;
+            data->key = 0;
+            return;
         }
 
         last_key = act_key;

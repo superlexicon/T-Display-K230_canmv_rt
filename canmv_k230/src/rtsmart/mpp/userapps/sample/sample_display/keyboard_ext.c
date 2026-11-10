@@ -352,10 +352,12 @@ uint32_t tca8418_get_key()
      if(code_index==7)//shift
      {
      flag_press_shift=1;
+     continue;
      }
      if(code_index==3||code_index==9)//fn
      {
      flag_press_fn=1;
+     continue;
      }
      if(code_index==10)//CapsLock
      {

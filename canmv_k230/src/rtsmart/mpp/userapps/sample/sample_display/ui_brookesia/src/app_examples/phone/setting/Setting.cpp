@@ -15,6 +15,7 @@
 #include "Setting.hpp"
 #include "../../../../../network/network_rt_opt.h"
 #include "../../../../../lexios_apps.hpp"
+#include "../../../../../keyboard_ext.h"
 #include "esp_brookesia_versions.h"
 
 #define ENABLE_DEBUG_LOG                (0)
@@ -360,6 +361,12 @@ static void adapt_verification_screen_geometry(void)
     lv_coord_t scr_w = lv_disp_get_hor_res(nullptr);
     lv_coord_t scr_h = lv_disp_get_ver_res(nullptr);
     bool is_landscape = (scr_w > scr_h);
+    bool hw_kb = tca8418_is_connected();
+
+    lv_coord_t y_ssid = hw_kb ? (is_landscape ? 92 : 160) : (is_landscape ? 58 : 112);
+    lv_coord_t y_meta = hw_kb ? (is_landscape ? 128 : 204) : (is_landscape ? 90 : 146);
+    lv_coord_t y_ta   = hw_kb ? (is_landscape ? 172 : 254) : (is_landscape ? 124 : 186);
+    lv_coord_t y_btn  = hw_kb ? (is_landscape ? 252 : 340) : (is_landscape ? 190 : 258);
 
     if (s_btn_verify_back) {
         lv_obj_set_size(s_btn_verify_back, 100, 42);
@@ -370,15 +377,15 @@ static void adapt_verification_screen_geometry(void)
     }
     if (ui_LabelScreenSettingVerificationSSID) {
         lv_obj_set_style_text_font(ui_LabelScreenSettingVerificationSSID, &lv_font_montserrat_24, 0);
-        lv_obj_align(ui_LabelScreenSettingVerificationSSID, LV_ALIGN_TOP_MID, 0, is_landscape ? 58 : 112);
+        lv_obj_align(ui_LabelScreenSettingVerificationSSID, LV_ALIGN_TOP_MID, 0, y_ssid);
     }
     if (s_label_verify_meta) {
-        lv_obj_align(s_label_verify_meta, LV_ALIGN_TOP_MID, 0, is_landscape ? 90 : 146);
+        lv_obj_align(s_label_verify_meta, LV_ALIGN_TOP_MID, 0, y_meta);
     }
     if (ui_TextAreaScreenSettingVerificationPassword) {
         lv_coord_t ta_w = is_landscape ? 460 : (scr_w - 130);
         lv_obj_set_size(ui_TextAreaScreenSettingVerificationPassword, ta_w, 56);
-        lv_obj_align(ui_TextAreaScreenSettingVerificationPassword, LV_ALIGN_TOP_MID, -44, is_landscape ? 124 : 186);
+        lv_obj_align(ui_TextAreaScreenSettingVerificationPassword, LV_ALIGN_TOP_MID, -44, y_ta);
     }
     if (s_btn_verify_eye) {
         lv_obj_set_size(s_btn_verify_eye, 80, 54);
@@ -388,16 +395,21 @@ static void adapt_verification_screen_geometry(void)
         lv_obj_set_size(s_btn_verify_connect, 170, 48);
         lv_obj_align(s_btn_verify_connect, LV_ALIGN_TOP_MID,
                      (s_btn_verify_forget && !lv_obj_has_flag(s_btn_verify_forget, LV_OBJ_FLAG_HIDDEN)) ? -95 : 0,
-                     is_landscape ? 190 : 258);
+                     y_btn);
     }
     if (s_btn_verify_forget) {
         lv_obj_set_size(s_btn_verify_forget, 170, 48);
-        lv_obj_align(s_btn_verify_forget, LV_ALIGN_TOP_MID, 95, is_landscape ? 190 : 258);
+        lv_obj_align(s_btn_verify_forget, LV_ALIGN_TOP_MID, 95, y_btn);
     }
     if (ui_KeyboardScreenSettingVerification) {
-        lv_obj_set_width(ui_KeyboardScreenSettingVerification, lv_pct(98));
-        lv_obj_set_height(ui_KeyboardScreenSettingVerification, is_landscape ? 235 : 360);
-        lv_obj_align(ui_KeyboardScreenSettingVerification, LV_ALIGN_BOTTOM_MID, 0, -48);
+        if (hw_kb) {
+            lv_obj_add_flag(ui_KeyboardScreenSettingVerification, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(ui_KeyboardScreenSettingVerification, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_width(ui_KeyboardScreenSettingVerification, lv_pct(98));
+            lv_obj_set_height(ui_KeyboardScreenSettingVerification, is_landscape ? 235 : 360);
+            lv_obj_align(ui_KeyboardScreenSettingVerification, LV_ALIGN_BOTTOM_MID, 0, -48);
+        }
     }
 }
 
@@ -1122,6 +1134,7 @@ void AppSettings::extraUiInit(void)
 
     processWifiConnect(WIFI_CONNECT_HIDE);
 
+    lv_textarea_set_one_line(ui_TextAreaScreenSettingVerificationPassword, true);
     lv_textarea_set_password_mode(ui_TextAreaScreenSettingVerificationPassword, true);
     lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, ui_TextAreaScreenSettingVerificationPassword);
     lv_obj_add_event_cb(ui_KeyboardScreenSettingVerification, onKeyboardScreenSettingVerificationReadyCallback, LV_EVENT_READY, this);
@@ -1579,9 +1592,12 @@ void AppSettings::scanWifiAndUpdateUi(void)
 {
     if (_is_ui_del || _is_ui_resumed) return;
 
+    static int s_last_kb_connected = -1;
+    int now_kb = tca8418_is_connected() ? 1 : 0;
     lv_coord_t cur_w = lv_disp_get_hor_res(nullptr);
-    if (cur_w != s_last_known_scr_w) {
+    if (cur_w != s_last_known_scr_w || now_kb != s_last_kb_connected) {
         s_last_known_scr_w = cur_w;
+        s_last_kb_connected = now_kb;
         adapt_main_screen_geometry();
         adapt_wifi_screen_geometry();
         adapt_verification_screen_geometry();
