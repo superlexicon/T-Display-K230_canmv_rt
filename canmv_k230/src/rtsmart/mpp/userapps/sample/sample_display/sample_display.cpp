@@ -268,13 +268,20 @@ extern "C" bool lexios_get_wifi_ble_power(void) {
 
 extern "C" void lexios_set_wifi_ble_power(bool enable) {
     /* Keep IO45_WIFI_EN pulled HIGH via U-Boot PU=1 so RTL8189 SDIO never glitches;
-     * only mux UART1 for BLE NUS when requested. */
+     * only mux UART1 for BLE NUS when requested, and notify k230_remoted Wi-Fi manager. */
     if (enable) {
         fpioa_set_function(3, UART1_TXD, -1, -1, -1, -1, -1, -1, -1);
         fpioa_set_function(4, UART1_RXD, -1, -1, -1, -1, -1, -1, -1);
         g_wifi_ble_power_on = true;
     } else {
         g_wifi_ble_power_on = false;
+    }
+    FILE *cf = fopen("/tmp/wifi_cmd.txt.tmp", "w");
+    if (cf) {
+        fprintf(cf, "ENABLE %d\n", enable ? 1 : 0);
+        fclose(cf);
+        unlink("/tmp/wifi_cmd.txt");
+        rename("/tmp/wifi_cmd.txt.tmp", "/tmp/wifi_cmd.txt");
     }
 }
 
@@ -753,18 +760,27 @@ static void qs_refresh_ui(void) {
     if (!g_qs_open) return;
 
     if (g_qs_info_lbl) {
-        char wifi_ip[32] = "Disconnected";
+        char wifi_summary[64] = "Disconnected";
         FILE *wf = fopen("/tmp/wifi_status.txt", "r");
         if (wf) {
-            char wline[64] = {0};
-            if (fgets(wline, sizeof(wline), wf) && strncmp(wline, "CONNECTED ", 10) == 0) {
-                sscanf(wline + 10, "%31s", wifi_ip);
+            char wline[96] = {0};
+            if (fgets(wline, sizeof(wline), wf)) {
+                if (strncmp(wline, "CONNECTED ", 10) == 0) {
+                    char wip[24] = {0}, wssid[32] = {0};
+                    if (sscanf(wline + 10, "%23s %31s", wip, wssid) >= 2 && wssid[0] != '\0') {
+                        snprintf(wifi_summary, sizeof(wifi_summary), "%s (%s)", wssid, wip);
+                    } else if (wip[0] != '\0') {
+                        snprintf(wifi_summary, sizeof(wifi_summary), "%s", wip);
+                    }
+                } else if (strncmp(wline, "DISABLED", 8) == 0) {
+                    snprintf(wifi_summary, sizeof(wifi_summary), "Off");
+                }
             }
             fclose(wf);
         }
         char ibuf[128];
         snprintf(ibuf, sizeof(ibuf), "Wi-Fi: %s  |  KB: %s  |  Die: %.1f C",
-                 wifi_ip,
+                 wifi_summary,
                  tca8418_is_connected() ? "ATTACHED" : "DETACHED",
                  g_last_die_temp_c);
         lv_label_set_text(g_qs_info_lbl, ibuf);
@@ -1322,11 +1338,24 @@ static void on_clock_update_timer_cb(struct _lv_timer_t *t)
         int wifi_state = 0;
         FILE *wf = fopen("/tmp/wifi_status.txt", "r");
         if (wf) {
-            char wbuf[64] = {0};
+            char wbuf[96] = {0};
+            bool connected = false;
+            int rssi = -55;
             if (fgets(wbuf, sizeof(wbuf), wf) && strncmp(wbuf, "CONNECTED", 9) == 0) {
-                wifi_state = 3;
+                connected = true;
+                while (fgets(wbuf, sizeof(wbuf), wf)) {
+                    if (strncmp(wbuf, "RSSI=", 5) == 0) {
+                        rssi = atoi(wbuf + 5);
+                        break;
+                    }
+                }
             }
             fclose(wf);
+            if (connected) {
+                if (rssi > -60) wifi_state = 3;
+                else if (rssi > -75) wifi_state = 2;
+                else wifi_state = 1;
+            }
         }
         phone->getHome().getStatusBar()->setWifiIconState(wifi_state);
     }

@@ -280,16 +280,17 @@ int network_rt_wlan_connect(char* ssid,char*key) {
         config.ssid.len = ssid_len;
         strncpy((char *)&config.ssid.val[0], ssid, RT_WLAN_SSID_MAX_LENGTH);
         config.ssid.val[ssid_len] = '\0';
-    int key_len = strlen(key);
-     if((0x08 > key_len) || (RT_WLAN_PASSWORD_MAX_LENGTH < key_len)) {
-       ret_code=-3;
-            return ret_code; 
+    int key_len = key ? (int)strlen(key) : 0;
+    if ((key_len > 0 && key_len < 0x08) || (RT_WLAN_PASSWORD_MAX_LENGTH < key_len)) {
+        ret_code = -3;
+        return ret_code;
     }
     config.key.len = key_len;
-    strncpy((char *)&config.key.val[0], key, RT_WLAN_PASSWORD_MAX_LENGTH);
+    if (key_len > 0) {
+        strncpy((char *)&config.key.val[0], key, RT_WLAN_PASSWORD_MAX_LENGTH);
+    }
     config.key.val[config.key.len] = '\0';
 
-   
    if(0x00 == ioctl(net_mgmt_dev_fd, IOCTRL_WM_STA_CONNECT, &config)) {
       ret_code=0;       
     }
@@ -313,6 +314,35 @@ int network_rt_wlan_isconnected(int *_status) {
         ret_code=0;
     }
 
+    return ret_code;
+}
+
+int network_rt_wlan_get_rssi(int *_rssi) {
+    int ret_code = -1;
+    int rssi = -99;
+    if (0x00 == ioctl(net_mgmt_dev_fd, IOCTRL_WM_STA_GET_RSSI, &rssi)) {
+        if (_rssi) *_rssi = rssi;
+        ret_code = 0;
+    }
+    return ret_code;
+}
+
+int network_rt_wlan_get_ap_info(struct rt_wlan_info *_info) {
+    int ret_code = -1;
+    if (!_info) return -1;
+    memset(_info, 0, sizeof(*_info));
+    if (0x00 == ioctl(net_mgmt_dev_fd, IOCTRL_WM_STA_GET_AP_INFO, _info)) {
+        ret_code = 0;
+    }
+    return ret_code;
+}
+
+int network_rt_wlan_set_auto_reconnect(int _enable) {
+    int ret_code = -1;
+    int val = _enable ? 1 : 0;
+    if (0x00 == ioctl(net_mgmt_dev_fd, IOCTRL_WM_SET_AUTO_RECONNECT, &val)) {
+        ret_code = 0;
+    }
     return ret_code;
 }
 

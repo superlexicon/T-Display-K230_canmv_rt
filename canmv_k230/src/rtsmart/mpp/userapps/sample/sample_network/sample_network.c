@@ -37,23 +37,45 @@ typedef struct {
     unsigned short val;
 } pin_gpio_t;
 
+#define MAX_WIFI_CREDS       16
+#define MAX_SCAN_ITEMS       64
+
 typedef struct {
     char ssid[64];
     char pass[64];
 } wifi_cred_t;
 
-static wifi_cred_t g_wifi_creds[4];
+typedef struct {
+    char ssid[64];
+    int rssi;
+    int channel;
+    int secured;
+    int saved;
+    int connected;
+} wifi_scan_item_t;
+
+static wifi_cred_t g_wifi_creds[MAX_WIFI_CREDS];
 static int g_wifi_cred_count = 0;
+static volatile int g_wifi_enabled = 1;
+static pthread_mutex_t g_wifi_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static wifi_scan_item_t g_scan_items[MAX_SCAN_ITEMS];
+static int g_scan_count = 0;
+static unsigned int g_scan_seq = 0;
 
 static uint8_t g_mac[6] = {0};
 static char g_mac_str[24] = "00:00:00:00:00:00";
 static char g_device_name[80] = "SuperLexicon-K230";
 static char g_node_privkey[96] = "";
 static char g_current_ssid[64] = "";
+static char g_target_ssid[64] = "";
+static char g_wifi_state[24] = "DISCONNECTED";
+static int g_current_rssi = -99;
 static char g_current_ip[24] = "0.0.0.0";
 static char g_current_gw[24] = "0.0.0.0";
 static char g_current_mask[24] = "0.0.0.0";
 static volatile int g_wifi_connected = 0;
+static time_t g_manual_disconnect_until = 0;
 static time_t g_boot_time = 0;
 static FILE *g_log_fp = NULL;
 
@@ -65,7 +87,7 @@ static void remoted_log(const char *fmt, ...) {
     va_end(ap);
 
     printf("[k230_remoted] %s\n", buf);
-    FILE *fp = fopen("/sdcard/remoted.log", "a");
+    FILE *fp = fopen("/tmp/remoted.log", "a");
     if (fp) {
         fprintf(fp, "[%ld] %s\n", (long)(time(NULL) - g_boot_time), buf);
         fclose(fp);
@@ -114,8 +136,34 @@ static void trigger_hardware_reboot(void) {
     }
 }
 
+static int find_wifi_cred_idx_locked(const char *ssid) {
+    if (!ssid || ssid[0] == '\0') return -1;
+    for (int i = 0; i < g_wifi_cred_count; i++) {
+        if (strcmp(g_wifi_creds[i].ssid, ssid) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void save_wifi_conf_locked(void) {
+    FILE *fp = fopen("/sdcard/wifi.conf.tmp", "w");
+    if (!fp) return;
+    fprintf(fp, "ENABLED=%d\n", g_wifi_enabled ? 1 : 0);
+    for (int i = 0; i < g_wifi_cred_count; i++) {
+        if (g_wifi_creds[i].ssid[0] == '\0') continue;
+        fprintf(fp, "SSID=%s\nPASS=%s\n", g_wifi_creds[i].ssid, g_wifi_creds[i].pass);
+    }
+    fflush(fp);
+    fclose(fp);
+    unlink("/sdcard/wifi.conf");
+    rename("/sdcard/wifi.conf.tmp", "/sdcard/wifi.conf");
+}
+
 static void load_wifi_conf(void) {
+    pthread_mutex_lock(&g_wifi_mutex);
     g_wifi_cred_count = 0;
+    g_wifi_enabled = 1;
     FILE *fp = fopen("/sdcard/wifi.conf", "r");
     if (fp) {
         char line[160];
@@ -125,14 +173,21 @@ static void load_wifi_conf(void) {
             char *nl = strpbrk(line, "\r\n");
             if (nl) *nl = '\0';
             if (line[0] == '#' || line[0] == '\0') continue;
-            if (strncmp(line, "SSID=", 5) == 0) {
+            if (strncmp(line, "ENABLED=", 8) == 0) {
+                g_wifi_enabled = (atoi(line + 8) != 0) ? 1 : 0;
+            } else if (strncmp(line, "SSID=", 5) == 0) {
                 snprintf(cur_ssid, sizeof(cur_ssid), "%s", line + 5);
             } else if (strncmp(line, "PASS=", 5) == 0) {
                 snprintf(cur_pass, sizeof(cur_pass), "%s", line + 5);
-                if (cur_ssid[0] != '\0' && g_wifi_cred_count < 4) {
-                    snprintf(g_wifi_creds[g_wifi_cred_count].ssid, sizeof(g_wifi_creds[0].ssid), "%s", cur_ssid);
-                    snprintf(g_wifi_creds[g_wifi_cred_count].pass, sizeof(g_wifi_creds[0].pass), "%s", cur_pass);
-                    g_wifi_cred_count++;
+                if (cur_ssid[0] != '\0' && g_wifi_cred_count < MAX_WIFI_CREDS) {
+                    int existing = find_wifi_cred_idx_locked(cur_ssid);
+                    if (existing >= 0) {
+                        snprintf(g_wifi_creds[existing].pass, sizeof(g_wifi_creds[existing].pass), "%s", cur_pass);
+                    } else {
+                        snprintf(g_wifi_creds[g_wifi_cred_count].ssid, sizeof(g_wifi_creds[0].ssid), "%s", cur_ssid);
+                        snprintf(g_wifi_creds[g_wifi_cred_count].pass, sizeof(g_wifi_creds[0].pass), "%s", cur_pass);
+                        g_wifi_cred_count++;
+                    }
                     cur_ssid[0] = '\0';
                 }
             }
@@ -146,7 +201,55 @@ static void load_wifi_conf(void) {
         snprintf(g_wifi_creds[1].ssid, sizeof(g_wifi_creds[1].ssid), "");
         snprintf(g_wifi_creds[1].pass, sizeof(g_wifi_creds[1].pass), "");
         g_wifi_cred_count = 2;
+        save_wifi_conf_locked();
     }
+    pthread_mutex_unlock(&g_wifi_mutex);
+}
+
+static void upsert_wifi_cred(const char *ssid, const char *pass, bool move_to_front) {
+    if (!ssid || ssid[0] == '\0') return;
+    pthread_mutex_lock(&g_wifi_mutex);
+    int idx = find_wifi_cred_idx_locked(ssid);
+    if (idx >= 0) {
+        snprintf(g_wifi_creds[idx].pass, sizeof(g_wifi_creds[idx].pass), "%s", pass ? pass : "");
+        if (move_to_front && idx > 0) {
+            wifi_cred_t tmp = g_wifi_creds[idx];
+            for (int i = idx; i > 0; i--) {
+                g_wifi_creds[i] = g_wifi_creds[i - 1];
+            }
+            g_wifi_creds[0] = tmp;
+        }
+    } else {
+        if (move_to_front) {
+            int limit = (g_wifi_cred_count < MAX_WIFI_CREDS) ? g_wifi_cred_count : (MAX_WIFI_CREDS - 1);
+            for (int i = limit; i > 0; i--) {
+                g_wifi_creds[i] = g_wifi_creds[i - 1];
+            }
+            snprintf(g_wifi_creds[0].ssid, sizeof(g_wifi_creds[0].ssid), "%s", ssid);
+            snprintf(g_wifi_creds[0].pass, sizeof(g_wifi_creds[0].pass), "%s", pass ? pass : "");
+            if (g_wifi_cred_count < MAX_WIFI_CREDS) g_wifi_cred_count++;
+        } else if (g_wifi_cred_count < MAX_WIFI_CREDS) {
+            snprintf(g_wifi_creds[g_wifi_cred_count].ssid, sizeof(g_wifi_creds[0].ssid), "%s", ssid);
+            snprintf(g_wifi_creds[g_wifi_cred_count].pass, sizeof(g_wifi_creds[0].pass), "%s", pass ? pass : "");
+            g_wifi_cred_count++;
+        }
+    }
+    save_wifi_conf_locked();
+    pthread_mutex_unlock(&g_wifi_mutex);
+}
+
+static void forget_wifi_cred(const char *ssid) {
+    if (!ssid || ssid[0] == '\0') return;
+    pthread_mutex_lock(&g_wifi_mutex);
+    int idx = find_wifi_cred_idx_locked(ssid);
+    if (idx >= 0) {
+        for (int i = idx; i + 1 < g_wifi_cred_count; i++) {
+            g_wifi_creds[i] = g_wifi_creds[i + 1];
+        }
+        g_wifi_cred_count--;
+        save_wifi_conf_locked();
+    }
+    pthread_mutex_unlock(&g_wifi_mutex);
 }
 
 static void replace_json_string_field(const char *src, const char *key, const char *new_val, char *dst, size_t dst_sz) {
@@ -321,15 +424,162 @@ static void read_thermal_info(int *out_level, double *out_temp) {
 static void write_wifi_status_file(void) {
     FILE *fp = fopen("/tmp/wifi_status.txt.tmp", "w");
     if (fp) {
-        if (g_wifi_connected && strcmp(g_current_ip, "0.0.0.0") != 0 && g_current_ip[0] != '\0') {
+        if (!g_wifi_enabled) {
+            fprintf(fp, "DISABLED 0.0.0.0 %s\n", g_mac_str);
+        } else if (g_wifi_connected && strcmp(g_current_ip, "0.0.0.0") != 0 && g_current_ip[0] != '\0') {
             fprintf(fp, "CONNECTED %s %s %s\n", g_current_ip, g_current_ssid, g_mac_str);
         } else {
             fprintf(fp, "DISCONNECTED 0.0.0.0 %s\n", g_mac_str);
         }
+        fprintf(fp, "ENABLED=%d\n", g_wifi_enabled ? 1 : 0);
+        fprintf(fp, "STATE=%s\n", g_wifi_state);
+        fprintf(fp, "RSSI=%d\n", g_wifi_connected ? g_current_rssi : -99);
+        fprintf(fp, "IP=%s\n", g_wifi_connected ? g_current_ip : "0.0.0.0");
+        fprintf(fp, "GW=%s\n", g_wifi_connected ? g_current_gw : "0.0.0.0");
+        fprintf(fp, "MAC=%s\n", g_mac_str);
+        fprintf(fp, "SSID=%s\n", g_wifi_connected ? g_current_ssid : "");
+        fprintf(fp, "TARGET_SSID=%s\n", g_target_ssid);
+        fprintf(fp, "SCAN_SEQ=%u\n", g_scan_seq);
+        fflush(fp);
         fclose(fp);
         unlink("/tmp/wifi_status.txt");
         rename("/tmp/wifi_status.txt.tmp", "/tmp/wifi_status.txt");
     }
+}
+
+static int compare_scan_items(const void *a, const void *b) {
+    const wifi_scan_item_t *ia = (const wifi_scan_item_t *)a;
+    const wifi_scan_item_t *ib = (const wifi_scan_item_t *)b;
+    if (ia->connected != ib->connected) {
+        return ib->connected - ia->connected;
+    }
+    if (ia->saved != ib->saved) {
+        return ib->saved - ia->saved;
+    }
+    if (ia->rssi != ib->rssi) {
+        return ib->rssi - ia->rssi;
+    }
+    return strcmp(ia->ssid, ib->ssid);
+}
+
+static void rewrite_wifi_scan_file(void) {
+    pthread_mutex_lock(&g_wifi_mutex);
+    for (int i = 0; i < g_scan_count; i++) {
+        g_scan_items[i].saved = (find_wifi_cred_idx_locked(g_scan_items[i].ssid) >= 0) ? 1 : 0;
+        g_scan_items[i].connected = (g_wifi_connected && strcmp(g_scan_items[i].ssid, g_current_ssid) == 0) ? 1 : 0;
+        if (g_scan_items[i].connected && g_current_rssi > -95) {
+            g_scan_items[i].rssi = g_current_rssi;
+        }
+    }
+    if (g_wifi_connected && g_current_ssid[0] != '\0') {
+        bool found_curr = false;
+        for (int i = 0; i < g_scan_count; i++) {
+            if (strcmp(g_scan_items[i].ssid, g_current_ssid) == 0) {
+                found_curr = true;
+                break;
+            }
+        }
+        if (!found_curr && g_scan_count < MAX_SCAN_ITEMS) {
+            wifi_scan_item_t *it = &g_scan_items[g_scan_count++];
+            memset(it, 0, sizeof(*it));
+            snprintf(it->ssid, sizeof(it->ssid), "%s", g_current_ssid);
+            it->rssi = (g_current_rssi > -95) ? g_current_rssi : -55;
+            it->channel = 1;
+            it->secured = 1;
+            it->saved = (find_wifi_cred_idx_locked(g_current_ssid) >= 0) ? 1 : 0;
+            it->connected = 1;
+        }
+    }
+    if (g_scan_count > 1) {
+        qsort(g_scan_items, (size_t)g_scan_count, sizeof(wifi_scan_item_t), compare_scan_items);
+    }
+    g_scan_seq++;
+    FILE *fp = fopen("/tmp/wifi_scan.txt.tmp", "w");
+    if (fp) {
+        fprintf(fp, "# SCAN_SEQ=%u TIME=%ld COUNT=%d\n", g_scan_seq, (long)time(NULL), g_scan_count);
+        for (int i = 0; i < g_scan_count; i++) {
+            fprintf(fp, "%d\t%d\t%d\t%d\t%d\t%s\n",
+                    g_scan_items[i].rssi,
+                    g_scan_items[i].secured,
+                    g_scan_items[i].channel,
+                    g_scan_items[i].saved,
+                    g_scan_items[i].connected,
+                    g_scan_items[i].ssid);
+        }
+        fflush(fp);
+        fclose(fp);
+        unlink("/tmp/wifi_scan.txt");
+        rename("/tmp/wifi_scan.txt.tmp", "/tmp/wifi_scan.txt");
+    }
+    pthread_mutex_unlock(&g_wifi_mutex);
+    write_wifi_status_file();
+}
+
+static int perform_wifi_scan(void) {
+    struct rt_wlan_info raw_list[MAX_SCAN_ITEMS];
+    memset(raw_list, 0, sizeof(raw_list));
+    int raw_count = 0;
+
+    if (!g_wifi_connected) {
+        snprintf(g_wifi_state, sizeof(g_wifi_state), "SCANNING");
+        write_wifi_status_file();
+    }
+
+    int rc = network_rt_wlan_scan(raw_list, MAX_SCAN_ITEMS, &raw_count);
+    if (rc != 0 || raw_count < 0) {
+        raw_count = 0;
+    }
+    if (raw_count > MAX_SCAN_ITEMS) {
+        raw_count = MAX_SCAN_ITEMS;
+    }
+
+    pthread_mutex_lock(&g_wifi_mutex);
+    g_scan_count = 0;
+    for (int i = 0; i < raw_count; i++) {
+        char ssid[64] = {0};
+        int len = raw_list[i].ssid.len;
+        if (len <= 0) continue;
+        if (len > RT_WLAN_SSID_MAX_LENGTH) len = RT_WLAN_SSID_MAX_LENGTH;
+        memcpy(ssid, raw_list[i].ssid.val, (size_t)len);
+        ssid[len] = '\0';
+        if (ssid[0] == '\0') continue;
+
+        int rssi = raw_list[i].rssi;
+        int secured = (raw_list[i].security != SECURITY_OPEN) ? 1 : 0;
+        int channel = raw_list[i].channel;
+
+        int dup_idx = -1;
+        for (int j = 0; j < g_scan_count; j++) {
+            if (strcmp(g_scan_items[j].ssid, ssid) == 0) {
+                dup_idx = j;
+                break;
+            }
+        }
+        if (dup_idx >= 0) {
+            if (rssi > g_scan_items[dup_idx].rssi) {
+                g_scan_items[dup_idx].rssi = rssi;
+                g_scan_items[dup_idx].channel = channel;
+            }
+            if (secured) {
+                g_scan_items[dup_idx].secured = 1;
+            }
+        } else if (g_scan_count < MAX_SCAN_ITEMS) {
+            wifi_scan_item_t *it = &g_scan_items[g_scan_count++];
+            memset(it, 0, sizeof(*it));
+            snprintf(it->ssid, sizeof(it->ssid), "%s", ssid);
+            it->rssi = rssi;
+            it->channel = channel;
+            it->secured = secured;
+        }
+    }
+    pthread_mutex_unlock(&g_wifi_mutex);
+
+    if (!g_wifi_connected && strcmp(g_wifi_state, "SCANNING") == 0) {
+        snprintf(g_wifi_state, sizeof(g_wifi_state), "DISCONNECTED");
+    }
+    rewrite_wifi_scan_file();
+    remoted_log("Wi-Fi scan completed: %d unique SSIDs found (raw=%d)", g_scan_count, raw_count);
+    return g_scan_count;
 }
 
 static void build_status_json(char *out, size_t out_sz) {
@@ -429,76 +679,353 @@ static void *udp_discovery_thread(void *arg) {
     return NULL;
 }
 
+static int connect_to_ap(const char *ssid, const char *pass, bool is_manual) {
+    if (!ssid || ssid[0] == '\0') return -1;
+
+    snprintf(g_target_ssid, sizeof(g_target_ssid), "%s", ssid);
+    snprintf(g_wifi_state, sizeof(g_wifi_state), "CONNECTING");
+    write_wifi_status_file();
+
+    remoted_log("Connecting to Wi-Fi SSID '%s' (manual=%d)...", ssid, is_manual ? 1 : 0);
+    network_rt_wlan_set_auto_reconnect(0);
+
+    int rc = network_rt_wlan_connect((char *)ssid, (char *)(pass ? pass : ""));
+    if (rc == 0) {
+        snprintf(g_current_ssid, sizeof(g_current_ssid), "%s", ssid);
+        set_net_ifconfig_dhcp(0);
+        for (int wait_i = 0; wait_i < 16; wait_i++) {
+            usleep(500000);
+            char ip[16] = {0}, mask[16] = {0}, gw[16] = {0}, dns[16] = {0};
+            if (get_net_ifconfig(0, ip, mask, gw, dns) == 0 &&
+                ip[0] != '\0' && strcmp(ip, "0.0.0.0") != 0) {
+                snprintf(g_current_ip, sizeof(g_current_ip), "%s", ip);
+                snprintf(g_current_mask, sizeof(g_current_mask), "%s", mask);
+                snprintf(g_current_gw, sizeof(g_current_gw), "%s", gw);
+                int rssi = -60;
+                if (network_rt_wlan_get_rssi(&rssi) == 0 && rssi < 0 && rssi > -100) {
+                    g_current_rssi = rssi;
+                } else {
+                    g_current_rssi = -58;
+                }
+                g_wifi_connected = 1;
+                snprintf(g_wifi_state, sizeof(g_wifi_state), "CONNECTED");
+                upsert_wifi_cred(ssid, pass ? pass : "", is_manual);
+                rewrite_wifi_scan_file();
+                remoted_log("Wi-Fi READY: SSID=%s IP=%s GW=%s RSSI=%ddBm MAC=%s",
+                            g_current_ssid, g_current_ip, g_current_gw, g_current_rssi, g_mac_str);
+                return 0;
+            }
+        }
+    }
+
+    remoted_log("Wi-Fi connect to '%s' failed (rc=%d)", ssid, rc);
+    g_wifi_connected = 0;
+    snprintf(g_current_ip, sizeof(g_current_ip), "0.0.0.0");
+    if (is_manual) {
+        snprintf(g_wifi_state, sizeof(g_wifi_state), "AUTH_FAILED");
+        write_wifi_status_file();
+        for (int i = 0; i < 6; i++) {
+            usleep(500000);
+            struct stat st;
+            if (stat("/tmp/wifi_cmd.txt", &st) == 0) break;
+        }
+    }
+    snprintf(g_wifi_state, sizeof(g_wifi_state), g_wifi_enabled ? "DISCONNECTED" : "DISABLED");
+    write_wifi_status_file();
+    return -1;
+}
+
+static bool process_wifi_cmd_file(void) {
+    FILE *fp = fopen("/tmp/wifi_cmd.txt", "r");
+    if (!fp) return false;
+
+    char line[256] = {0};
+    bool got = (fgets(line, sizeof(line), fp) != NULL);
+    fclose(fp);
+    unlink("/tmp/wifi_cmd.txt");
+    if (!got) return false;
+
+    char *nl = strpbrk(line, "\r\n");
+    if (nl) *nl = '\0';
+    if (line[0] == '\0') return false;
+
+    remoted_log("Processing UI Wi-Fi command: '%s'", line);
+
+    if (strncmp(line, "ENABLE ", 7) == 0) {
+        int en = atoi(line + 7);
+        pthread_mutex_lock(&g_wifi_mutex);
+        g_wifi_enabled = en ? 1 : 0;
+        save_wifi_conf_locked();
+        pthread_mutex_unlock(&g_wifi_mutex);
+        if (!g_wifi_enabled) {
+            network_rt_wlan_set_auto_reconnect(0);
+            network_rt_wlan_disconnect();
+            g_wifi_connected = 0;
+            g_current_ssid[0] = '\0';
+            g_target_ssid[0] = '\0';
+            g_current_rssi = -99;
+            snprintf(g_current_ip, sizeof(g_current_ip), "0.0.0.0");
+            snprintf(g_wifi_state, sizeof(g_wifi_state), "DISABLED");
+            unlink("/tmp/wifi_scan.txt");
+            write_wifi_status_file();
+        } else {
+            g_manual_disconnect_until = 0;
+            snprintf(g_wifi_state, sizeof(g_wifi_state), "SCANNING");
+            write_wifi_status_file();
+            perform_wifi_scan();
+        }
+        return true;
+    } else if (strcmp(line, "SCAN") == 0) {
+        if (g_wifi_enabled) {
+            perform_wifi_scan();
+        }
+        return true;
+    } else if (strcmp(line, "DISCONNECT") == 0) {
+        network_rt_wlan_set_auto_reconnect(0);
+        network_rt_wlan_disconnect();
+        g_wifi_connected = 0;
+        g_current_ssid[0] = '\0';
+        g_target_ssid[0] = '\0';
+        g_current_rssi = -99;
+        snprintf(g_current_ip, sizeof(g_current_ip), "0.0.0.0");
+        snprintf(g_wifi_state, sizeof(g_wifi_state), "DISCONNECTED");
+        g_manual_disconnect_until = time(NULL) + 20;
+        rewrite_wifi_scan_file();
+        return true;
+    } else if (strncmp(line, "FORGET ", 7) == 0) {
+        const char *f_ssid = line + 7;
+        forget_wifi_cred(f_ssid);
+        if (g_wifi_connected && strcmp(g_current_ssid, f_ssid) == 0) {
+            network_rt_wlan_disconnect();
+            g_wifi_connected = 0;
+            g_current_ssid[0] = '\0';
+            g_target_ssid[0] = '\0';
+            g_current_rssi = -99;
+            snprintf(g_current_ip, sizeof(g_current_ip), "0.0.0.0");
+            snprintf(g_wifi_state, sizeof(g_wifi_state), "DISCONNECTED");
+        }
+        rewrite_wifi_scan_file();
+        return true;
+    } else if (strncmp(line, "CONNECT ", 8) == 0) {
+        char *payload = line + 8;
+        char *tab = strchr(payload, '\t');
+        char ssid[64] = {0};
+        char pass[64] = {0};
+        if (tab) {
+            *tab = '\0';
+            snprintf(ssid, sizeof(ssid), "%s", payload);
+            snprintf(pass, sizeof(pass), "%s", tab + 1);
+        } else {
+            snprintf(ssid, sizeof(ssid), "%s", payload);
+            pthread_mutex_lock(&g_wifi_mutex);
+            int idx = find_wifi_cred_idx_locked(ssid);
+            if (idx >= 0) {
+                snprintf(pass, sizeof(pass), "%s", g_wifi_creds[idx].pass);
+            }
+            pthread_mutex_unlock(&g_wifi_mutex);
+        }
+        if (ssid[0] != '\0') {
+            if (!g_wifi_enabled) {
+                pthread_mutex_lock(&g_wifi_mutex);
+                g_wifi_enabled = 1;
+                save_wifi_conf_locked();
+                pthread_mutex_unlock(&g_wifi_mutex);
+            }
+            g_manual_disconnect_until = 0;
+            if (g_wifi_connected) {
+                network_rt_wlan_disconnect();
+                g_wifi_connected = 0;
+                usleep(200000);
+            }
+            connect_to_ap(ssid, pass, true);
+        }
+        return true;
+    }
+    return false;
+}
+
 static void *wifi_manager_thread(void *arg) {
     (void)arg;
     load_wifi_conf();
+    network_rt_wlan_set_auto_reconnect(0);
 
-    int cred_idx = 0;
+    int fallback_cred_idx = 0;
+    time_t last_rssi_poll = 0;
+    time_t last_bg_scan = 0;
+
     while (1) {
+        if (process_wifi_cmd_file()) {
+            continue;
+        }
+
+        if (!g_wifi_enabled) {
+            int status = 0;
+            if (network_rt_wlan_isconnected(&status) == 0 && status == 1) {
+                network_rt_wlan_disconnect();
+            }
+            g_wifi_connected = 0;
+            snprintf(g_wifi_state, sizeof(g_wifi_state), "DISABLED");
+            write_wifi_status_file();
+            usleep(250000);
+            continue;
+        }
+
         int status = 0;
         network_rt_wlan_isconnected(&status);
         if (status == 1) {
             char ip[16] = {0}, mask[16] = {0}, gw[16] = {0}, dns[16] = {0};
             if (get_net_ifconfig(0, ip, mask, gw, dns) == 0 &&
                 ip[0] != '\0' && strcmp(ip, "0.0.0.0") != 0) {
-                if (!g_wifi_connected || strcmp(g_current_ip, ip) != 0) {
+                time_t now = time(NULL);
+                bool state_changed = (!g_wifi_connected || strcmp(g_current_ip, ip) != 0);
+
+                if (g_current_ssid[0] == '\0') {
+                    struct rt_wlan_info ap_info;
+                    if (network_rt_wlan_get_ap_info(&ap_info) == 0 && ap_info.ssid.len > 0) {
+                        int slen = ap_info.ssid.len;
+                        if (slen > RT_WLAN_SSID_MAX_LENGTH) slen = RT_WLAN_SSID_MAX_LENGTH;
+                        memcpy(g_current_ssid, ap_info.ssid.val, (size_t)slen);
+                        g_current_ssid[slen] = '\0';
+                    }
+                }
+
+                if (state_changed || (now - last_rssi_poll >= 3)) {
+                    last_rssi_poll = now;
+                    int rssi = -60;
+                    if (network_rt_wlan_get_rssi(&rssi) == 0 && rssi < 0 && rssi > -100) {
+                        g_current_rssi = rssi;
+                    } else if (g_current_rssi <= -95) {
+                        g_current_rssi = -58;
+                    }
                     snprintf(g_current_ip, sizeof(g_current_ip), "%s", ip);
                     snprintf(g_current_mask, sizeof(g_current_mask), "%s", mask);
                     snprintf(g_current_gw, sizeof(g_current_gw), "%s", gw);
                     g_wifi_connected = 1;
+                    snprintf(g_wifi_state, sizeof(g_wifi_state), "CONNECTED");
                     write_wifi_status_file();
-                    remoted_log("Wi-Fi CONNECTED: SSID=%s IP=%s GW=%s MAC=%s",
-                                g_current_ssid, g_current_ip, g_current_gw, g_mac_str);
+                    if (state_changed) {
+                        rewrite_wifi_scan_file();
+                        remoted_log("Wi-Fi CONNECTED: SSID=%s IP=%s GW=%s RSSI=%ddBm MAC=%s",
+                                    g_current_ssid, g_current_ip, g_current_gw, g_current_rssi, g_mac_str);
+                    }
                 }
-                sleep(4);
+
+                /* Populate initial scan cache once after boot so Settings -> Wi-Fi opens instantly */
+                if (g_scan_seq == 0 && (now - g_boot_time >= 14)) {
+                    perform_wifi_scan();
+                    last_bg_scan = time(NULL);
+                }
+
+                for (int w = 0; w < 10; w++) {
+                    usleep(200000);
+                    if (process_wifi_cmd_file()) break;
+                }
                 continue;
             } else {
                 set_net_ifconfig_dhcp(0);
-                sleep(2);
+                for (int w = 0; w < 8; w++) {
+                    usleep(250000);
+                    if (process_wifi_cmd_file()) break;
+                }
                 if (get_net_ifconfig(0, ip, mask, gw, dns) == 0 &&
                     ip[0] != '\0' && strcmp(ip, "0.0.0.0") != 0) {
                     snprintf(g_current_ip, sizeof(g_current_ip), "%s", ip);
                     snprintf(g_current_mask, sizeof(g_current_mask), "%s", mask);
                     snprintf(g_current_gw, sizeof(g_current_gw), "%s", gw);
                     g_wifi_connected = 1;
-                    write_wifi_status_file();
+                    snprintf(g_wifi_state, sizeof(g_wifi_state), "CONNECTED");
+                    rewrite_wifi_scan_file();
                     remoted_log("Wi-Fi DHCP LEASED: SSID=%s IP=%s GW=%s",
                                 g_current_ssid, g_current_ip, g_current_gw);
-                    sleep(4);
                     continue;
                 }
             }
         }
 
         g_wifi_connected = 0;
+        snprintf(g_current_ip, sizeof(g_current_ip), "0.0.0.0");
+        snprintf(g_wifi_state, sizeof(g_wifi_state), "DISCONNECTED");
         write_wifi_status_file();
 
-        wifi_cred_t *cred = &g_wifi_creds[cred_idx % g_wifi_cred_count];
-        cred_idx++;
-        remoted_log("Connecting to Wi-Fi SSID '%s'...", cred->ssid);
-        int rc = network_rt_wlan_connect(cred->ssid, cred->pass);
-        if (rc == 0) {
-            snprintf(g_current_ssid, sizeof(g_current_ssid), "%s", cred->ssid);
-            set_net_ifconfig_dhcp(0);
-            for (int wait_i = 0; wait_i < 10; wait_i++) {
-                sleep(1);
-                char ip[16] = {0}, mask[16] = {0}, gw[16] = {0}, dns[16] = {0};
-                if (get_net_ifconfig(0, ip, mask, gw, dns) == 0 &&
-                    ip[0] != '\0' && strcmp(ip, "0.0.0.0") != 0) {
-                    snprintf(g_current_ip, sizeof(g_current_ip), "%s", ip);
-                    snprintf(g_current_mask, sizeof(g_current_mask), "%s", mask);
-                    snprintf(g_current_gw, sizeof(g_current_gw), "%s", gw);
-                    g_wifi_connected = 1;
-                    write_wifi_status_file();
-                    remoted_log("Wi-Fi READY: SSID=%s IP=%s GW=%s MAC=%s",
-                                g_current_ssid, g_current_ip, g_current_gw, g_mac_str);
-                    break;
+        if (time(NULL) < g_manual_disconnect_until) {
+            usleep(250000);
+            continue;
+        }
+
+        /* Active Scan & Auto-Reconnect to Saved Network in Range with Strongest Signal (RSSI) */
+        perform_wifi_scan();
+        last_bg_scan = time(NULL);
+        if (process_wifi_cmd_file()) continue;
+
+        typedef struct {
+            char ssid[64];
+            char pass[64];
+            int rssi;
+        } candidate_ap_t;
+        candidate_ap_t candidates[MAX_WIFI_CREDS];
+        int cand_count = 0;
+
+        pthread_mutex_lock(&g_wifi_mutex);
+        for (int i = 0; i < g_scan_count && cand_count < MAX_WIFI_CREDS; i++) {
+            int cidx = find_wifi_cred_idx_locked(g_scan_items[i].ssid);
+            if (cidx >= 0) {
+                snprintf(candidates[cand_count].ssid, sizeof(candidates[0].ssid), "%s", g_wifi_creds[cidx].ssid);
+                snprintf(candidates[cand_count].pass, sizeof(candidates[0].pass), "%s", g_wifi_creds[cidx].pass);
+                candidates[cand_count].rssi = g_scan_items[i].rssi;
+                cand_count++;
+            }
+        }
+        pthread_mutex_unlock(&g_wifi_mutex);
+
+        /* Sort matching saved networks strictly by strongest RSSI descending */
+        for (int i = 0; i < cand_count; i++) {
+            for (int j = i + 1; j < cand_count; j++) {
+                if (candidates[j].rssi > candidates[i].rssi) {
+                    candidate_ap_t tmp = candidates[i];
+                    candidates[i] = candidates[j];
+                    candidates[j] = tmp;
                 }
             }
-        } else {
-            remoted_log("Wi-Fi connect to '%s' returned %d; retrying...", cred->ssid, rc);
-            sleep(3);
         }
+
+        bool connected_ok = false;
+        for (int i = 0; i < cand_count; i++) {
+            remoted_log("Auto-reconnecting to strongest visible saved AP '%s' (RSSI=%ddBm, rank %d/%d)...",
+                        candidates[i].ssid, candidates[i].rssi, i + 1, cand_count);
+            if (connect_to_ap(candidates[i].ssid, candidates[i].pass, false) == 0) {
+                connected_ok = true;
+                break;
+            }
+            if (process_wifi_cmd_file()) {
+                connected_ok = true;
+                break;
+            }
+        }
+
+        /* Fallback for hidden SSIDs or transient beacon miss: try next saved credential directly */
+        if (!connected_ok && g_wifi_cred_count > 0 && cand_count == 0) {
+            char fb_ssid[64] = {0}, fb_pass[64] = {0};
+            pthread_mutex_lock(&g_wifi_mutex);
+            if (g_wifi_cred_count > 0) {
+                wifi_cred_t *c = &g_wifi_creds[fallback_cred_idx % g_wifi_cred_count];
+                fallback_cred_idx++;
+                snprintf(fb_ssid, sizeof(fb_ssid), "%s", c->ssid);
+                snprintf(fb_pass, sizeof(fb_pass), "%s", c->pass);
+            }
+            pthread_mutex_unlock(&g_wifi_mutex);
+
+            if (fb_ssid[0] != '\0') {
+                connect_to_ap(fb_ssid, fb_pass, false);
+            }
+        }
+
+        if (!g_wifi_connected) {
+            for (int w = 0; w < 12; w++) {
+                usleep(250000);
+                if (process_wifi_cmd_file()) break;
+            }
+        }
+        (void)last_bg_scan;
     }
     return NULL;
 }
@@ -809,18 +1336,26 @@ static void handle_client_session(int cfd) {
             }
         } else if (strncmp(cmd_line, "WIFI ", 5) == 0) {
             char ssid[64] = {0}, pass[64] = {0};
-            if (sscanf(cmd_line + 5, "%63s %63s", ssid, pass) == 2) {
-                FILE *wf = fopen("/sdcard/wifi.conf", "w");
-                if (wf) {
-                    fprintf(wf, "SSID=%s\nPASS=%s\nSSID=\nPASS=\n", ssid, pass);
-                    fclose(wf);
+            if (sscanf(cmd_line + 5, "%63s %63s", ssid, pass) >= 1 && ssid[0] != '\0') {
+                upsert_wifi_cred(ssid, pass, true);
+                FILE *cf = fopen("/tmp/wifi_cmd.txt.tmp", "w");
+                if (cf) {
+                    fprintf(cf, "CONNECT %s\t%s\n", ssid, pass);
+                    fclose(cf);
+                    rename("/tmp/wifi_cmd.txt.tmp", "/tmp/wifi_cmd.txt");
                 }
-                load_wifi_conf();
-                g_wifi_connected = 0;
                 send_all(cfd, "OK\n", 3);
             } else {
-                send_all(cfd, "ERR usage: WIFI <ssid> <pass>\n", 30);
+                send_all(cfd, "ERR usage: WIFI <ssid> [pass]\n", 30);
             }
+        } else if (strcmp(cmd_line, "WIFI_SCAN") == 0) {
+            FILE *cf = fopen("/tmp/wifi_cmd.txt.tmp", "w");
+            if (cf) {
+                fprintf(cf, "SCAN\n");
+                fclose(cf);
+                rename("/tmp/wifi_cmd.txt.tmp", "/tmp/wifi_cmd.txt");
+            }
+            send_all(cfd, "OK\n", 3);
         } else if (strncmp(cmd_line, "MODE ", 5) == 0) {
             char mode[32] = {0};
             char subnet[32] = "00000001";

@@ -478,6 +478,9 @@ int network_rt_wlan_scan(struct rt_wlan_info* rt_wlan_info_list,int wlan_num, in
 int network_rt_wlan_connect(char* ssid,char*key); 
 int network_rt_wlan_disconnect();
 int network_rt_wlan_isconnected(int *_status);
+int network_rt_wlan_get_rssi(int *_rssi);
+int network_rt_wlan_get_ap_info(struct rt_wlan_info *_info);
+int network_rt_wlan_set_auto_reconnect(int _enable);
 
 
 
