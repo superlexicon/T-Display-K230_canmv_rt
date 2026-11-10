@@ -1005,7 +1005,10 @@ RT_WEAK int lwp_load(const char *filename, struct rt_lwp *lwp, uint8_t *load_add
     fd_tmp = -1;
     temp = NULL;
 
-    if(CONFIG_MEM_RTSMART_HEAP_SIZE < (len * 3)) {
+    /* dfs_tmpfs backs /tmp/load_temp with a single contiguous rt_realloc() buffer
+     * from the kernel heap (64 MB on K230). Staging ELFs larger than 4 MB fragments
+     * or exhausts the kernel heap during 64 KB incremental reallocs. */
+    if ((len > (4 * 1024 * 1024)) || (CONFIG_MEM_RTSMART_HEAP_SIZE < (len * 8))) {
         goto _temp_failed;
     }
 
@@ -1069,6 +1072,8 @@ _temp_failed:
 
     if(fd_tmp >= 0) {
         close(fd_tmp);
+        unlink(tmp_file_name);
+        lseek(fd, 0, SEEK_SET);
     }
 #endif
 

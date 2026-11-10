@@ -146,7 +146,7 @@ void lv_port_indev_init(void)
 {
     static lv_indev_drv_t indev_drv;
     static lv_indev_drv_t keypad_drv;
-    
+
     /*------------------
      * Touchpad
      * -----------------*/
@@ -159,7 +159,7 @@ void lv_port_indev_init(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = touchpad_read;
     indev_touchpad = lv_indev_drv_register(&indev_drv);
-    
+
     /*------------------
      * Physical QWERTY Keypad (TCA8418 on I2C4, auto-detected)
      * -----------------*/
@@ -250,6 +250,9 @@ static lv_coord_t cached_touch_y = 0;
 extern bool lexios_is_screen_asleep(void);
 extern void lexios_set_screen_sleep(bool sleep);
 extern void lexios_notify_user_activity(void);
+extern int lexios_get_display_rotation(void);
+extern void lexios_toggle_quick_settings(void);
+extern void lexios_cycle_rotation_mode(void);
 
 /*Return true is the touchpad is pressed*/
 static bool touchpad_is_pressed(void)
@@ -266,8 +269,29 @@ static bool touchpad_is_pressed(void)
             lexios_set_screen_sleep(false);
             return false;
         }
-        cached_touch_x = (lv_coord_t)touch_data[0].x_coordinate;
-        cached_touch_y = (lv_coord_t)touch_data[0].y_coordinate;
+        int rx = (int)touch_data[0].x_coordinate;
+        int ry = (int)touch_data[0].y_coordinate;
+        if (rx < 0) rx = 0;
+        if (rx > 567) rx = 567;
+        if (ry < 0) ry = 0;
+        if (ry > 1231) ry = 1231;
+
+        int rot = lexios_get_display_rotation();
+        if (rot == 0) {
+            cached_touch_x = (lv_coord_t)rx;
+            cached_touch_y = (lv_coord_t)ry;
+        } else if (rot == 2) {
+            cached_touch_x = (lv_coord_t)(567 - rx);
+            cached_touch_y = (lv_coord_t)(1231 - ry);
+        } else if (rot == 3) {
+            /* 270 deg CCW Landscape (1232x568) */
+            cached_touch_x = (lv_coord_t)ry;
+            cached_touch_y = (lv_coord_t)(567 - rx);
+        } else {
+            /* 90 deg CW Landscape (1232x568) */
+            cached_touch_x = (lv_coord_t)(1231 - ry);
+            cached_touch_y = (lv_coord_t)rx;
+        }
         return true;
     }
     return false;
@@ -350,6 +374,36 @@ static void keypad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
             	break;     
             case 0x8B:
                 control_keyboard_indicator_led_caps_lock(flag_press_caps_lock);
+                break;
+            case 'r':
+            case 'R':
+                if (flag_press_fn == 1) {
+                    lexios_cycle_rotation_mode();
+                    flag_press_fn = 0;
+                    data->state = LV_INDEV_STATE_REL;
+                    data->key = 0;
+                    return;
+                }
+                break;
+            case 'q':
+            case 'Q':
+                if (flag_press_fn == 1) {
+                    lexios_toggle_quick_settings();
+                    flag_press_fn = 0;
+                    data->state = LV_INDEV_STATE_REL;
+                    data->key = 0;
+                    return;
+                }
+                break;
+            case 's':
+            case 'S':
+                if (flag_press_fn == 1) {
+                    lexios_set_screen_sleep(true);
+                    flag_press_fn = 0;
+                    data->state = LV_INDEV_STATE_REL;
+                    data->key = 0;
+                    return;
+                }
                 break;
             default:
                 break;

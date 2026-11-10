@@ -36,6 +36,7 @@ public:
     ESP_Brookesia_CoreApp *getRunningAppById(int id);
     ESP_Brookesia_CoreApp *getActiveApp(void) const { return _active_app; }
     const lv_img_dsc_t *getAppSnapshot(int id);
+    bool recalibrateAppsVisualArea(void);
     // *INDENT-OFF*
 
 protected:

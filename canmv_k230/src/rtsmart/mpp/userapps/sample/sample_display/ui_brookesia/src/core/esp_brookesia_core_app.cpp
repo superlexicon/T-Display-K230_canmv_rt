@@ -583,9 +583,14 @@ bool ESP_Brookesia_CoreApp::calibrateVisualArea(void)
     uint16_t visual_area_h = 0;
     lv_area_t visual_area = _app_style.origin_visual_area;
     const ESP_Brookesia_StyleSize_t &screen_size = _core->getCoreData().screen_size;
-    const ESP_Brookesia_StyleSize_t &app_size = getCoreActiveData().screen_size;
 
     ESP_BROOKESIA_CHECK_FALSE_RETURN(checkInitialized(), false, "Not initialized");
+
+    /* Recalibrate app target screen_size against current active Portrait/Landscape stylesheet */
+    _core_active_data.screen_size = _core_init_data.screen_size;
+    _core->getCoreHome().calibrateCoreObjectSize(screen_size, _core_active_data.screen_size);
+    const ESP_Brookesia_StyleSize_t &app_size = getCoreActiveData().screen_size;
+
     ESP_BROOKESIA_LOGD("App(%s: %d) calibrate visual area[origin: (%d,%d)-(%d,%d)]", getName(),
                        _id, visual_area.x1, visual_area.y1, visual_area.x2, visual_area.y2);
 
@@ -846,6 +851,7 @@ void ESP_Brookesia_CoreApp::onResizeScreenLoadedEventCallback(lv_event_t *event)
 
     area = app->getVisualArea();
     lv_obj_set_pos(screen, area.x1, area.y1);
+    lv_obj_set_size(screen, area.x2 - area.x1 + 1, area.y2 - area.y1 + 1);
 }
 
 // TODO

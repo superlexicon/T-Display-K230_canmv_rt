@@ -62,6 +62,47 @@ int flag_press_fn=0;
 static int flag_press_shift=0;
 int flag_press_caps_lock=0;
 static int fd_keyboard=-1;
+static int s_fd_i2c4=-1;
+static bool s_kb_connected=false;
+static bool s_bq25896_adc_started=false;
+static int g_kb_backlight_duty = 10;
+
+static int ensure_i2c4_open(void)
+{
+    if (s_fd_i2c4 > 0) {
+        return s_fd_i2c4;
+    }
+    fpioa_set_function(46, IIC4_SCL, -1, -1, -1, -1, -1, -1, -1);
+    fpioa_set_function(47, IIC4_SDA, -1, -1, -1, -1, -1, -1, -1);
+    s_fd_i2c4 = open("/dev/i2c4", O_RDWR);
+    if (s_fd_i2c4 > 0) {
+        uint32_t speed = 100000;
+        ioctl(s_fd_i2c4, RT_I2C_DEV_CTRL_CLK, &speed);
+    }
+    return s_fd_i2c4;
+}
+
+static int i2c4_read_bytes(int fd, uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_data, int length)
+{
+    if (fd <= 0) return -1;
+    i2c_msg_t msgs[2] = {
+        {.addr = dev_addr, .flags = 0, .len = 1, .buf = &reg_addr},
+        {.addr = dev_addr, .flags = 1, .len = (uint16_t)length, .buf = reg_data},
+    };
+    i2c_priv_data_t privdata = {msgs, 2};
+    return (ioctl(fd, RT_I2C_DEV_CTRL_RW, &privdata) == 0) ? 0 : -1;
+}
+
+static int i2c4_write_reg_byte(int fd, uint8_t dev_addr, uint8_t reg_addr, uint8_t reg_data)
+{
+    if (fd <= 0) return -1;
+    uint8_t buff[2] = {reg_addr, reg_data};
+    i2c_msg_t msgs[1] = {
+        {.addr = dev_addr, .flags = 0, .len = 2, .buf = buff},
+    };
+    i2c_priv_data_t privdata = {msgs, 1};
+    return (ioctl(fd, RT_I2C_DEV_CTRL_RW, &privdata) == 0) ? 0 : -1;
+}
 
 static int tca8418_read_reg(int fd, uint8_t reg_addr,
         uint8_t *reg_data, int length)
@@ -176,15 +217,9 @@ void tca8418_init()
     }
  
 
-    fpioa_set_function(46,IIC4_SCL,-1,-1,-1,-1,-1,-1,-1);
-    fpioa_set_function(47,IIC4_SDA,-1,-1,-1,-1,-1,-1,-1);    
-    fd_keyboard = open("/dev/i2c4", O_RDWR);
-    if (fd_keyboard> 0)
+    fd_keyboard = ensure_i2c4_open();
+    if (fd_keyboard > 0)
     {
-        uint32_t spped=100000;
-     if (ioctl(fd_keyboard, RT_I2C_DEV_CTRL_CLK, &spped) != 0){ //设置速率
-        printf("set speed %d failed!\n",spped);
-    }
     //init_tca8418
     int ret;
     uint8_t reg_data;
@@ -197,20 +232,12 @@ void tca8418_init()
     reg_data=0x00;
     ret=tca8418_write_reg(fd_keyboard, 0x25,reg_data);//
     
-    
-    
-    
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x20,reg_data);//
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x21,reg_data);//
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x22,reg_data);//
-    
-    
-    
-    
-    
     
     reg_data=0x00;
     ret=tca8418_write_reg(fd_keyboard, 0x26,reg_data);//   
@@ -219,19 +246,12 @@ void tca8418_init()
     reg_data=0x00;
     ret=tca8418_write_reg(fd_keyboard, 0x28,reg_data);//
     
-    
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x1A,reg_data);
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x1B,reg_data);
     reg_data=0xFF;
     ret=tca8418_write_reg(fd_keyboard, 0x1C,reg_data);    
-    
-    
-    
-    
-    
-    
     
     /////////////////////////////////////////////////////////////////////////
     reg_data=0x7F;
@@ -248,11 +268,12 @@ void tca8418_init()
     //test keyboard exist
     if(ret==-1)
     {
-    close(fd_keyboard);
-    fd_keyboard=-1;
+    s_kb_connected = false;
+    fd_keyboard = -1;
     printf("keyboard is not exist\n");
     return;
     }
+    s_kb_connected = true;
     printf("detect keyboard device\n");
     //printf("addr1 0x01 and data=%#X\n", reg_data);
     reg_data=(reg_data&0xF0)|0x01;//key_event
@@ -266,7 +287,36 @@ void tca8418_init()
 }
 bool tca8418_is_connected()
 {
-    return fd_keyboard > 0;
+    return s_kb_connected && (fd_keyboard > 0);
+}
+
+bool tca8418_poll_presence(void)
+{
+    uint8_t reg_data = 0;
+    int fd = ensure_i2c4_open();
+    if (fd <= 0) {
+        return false;
+    }
+    if (s_kb_connected && fd_keyboard > 0) {
+        if (tca8418_read_reg(fd_keyboard, 0x01, &reg_data, 1) != 0) {
+            s_kb_connected = false;
+            fd_keyboard = -1;
+            printf("[KB] Keyboard detached from I2C4\n");
+            return false;
+        }
+        return true;
+    } else {
+        int ret = tca8418_read_reg(fd, 0x01, &reg_data, 1);
+        if (ret == 0) {
+            tca8418_init();
+            if (s_kb_connected && fd_keyboard > 0) {
+                control_keyboard_backlight(20000, g_kb_backlight_duty);
+                printf("[KB] Keyboard hot-plugged and initialized on I2C4\n");
+                return true;
+            }
+        }
+        return false;
+    }
 }
 
 uint32_t tca8418_get_key()
@@ -358,6 +408,9 @@ uint32_t tca8418_get_key()
 }
  void control_keyboard_backlight(int freq,int duty)//hz  50%
  {
+    if (duty < 0) duty = 0;
+    if (duty > 100) duty = 100;
+    g_kb_backlight_duty = duty;
     fpioa_set_function(52,PWM4,-1,-1,-1,-1,-1,-1,-1);
     int fd_pwm = open("/dev/pwm", O_RDWR);
     if (fd_pwm>0)
@@ -367,10 +420,194 @@ uint32_t tca8418_get_key()
     config.period = pow(10,9)/freq;//ns  50000
     config.pulse = config.period*duty/100;  //20khz    10%
     ioctl(fd_pwm, KD_PWM_CMD_SET, &config); 
-    ioctl(fd_pwm, KD_PWM_CMD_ENABLE,&config); 
+    if (duty > 0) {
+        ioctl(fd_pwm, KD_PWM_CMD_ENABLE,&config); 
+    } else {
+        ioctl(fd_pwm, KD_PWM_CMD_DISABLE,&config);
+    }
     close(fd_pwm);    
     }
  }
+
+void keyboard_set_backlight_level(int duty)
+{
+    control_keyboard_backlight(20000, duty);
+}
+
+int keyboard_get_backlight_level(void)
+{
+    return g_kb_backlight_duty;
+}
+
+void keyboard_set_backlight_sleep(bool sleep_off)
+{
+    int saved = g_kb_backlight_duty;
+    if (sleep_off) {
+        control_keyboard_backlight(20000, 0);
+        g_kb_backlight_duty = saved;
+    } else if (tca8418_is_connected()) {
+        control_keyboard_backlight(20000, saved);
+    }
+}
+
+static int vapcell_g68_ocv_to_soc_x10(int vocv_mv)
+{
+    /* 11-point piecewise-linear OCV curve for 2x Vapcell G68 21700 (6800mAh x 2 = 13600mAh 1S2P)
+     * High-density INR21700-6800 cell (4.20V full, 3.60V nominal, 3.00V system cutoff) */
+    static const struct {
+        int mv;
+        int soc_x10;
+    } kCurve[] = {
+        {4180, 1000},
+        {4075,  900},
+        {3975,  800},
+        {3885,  700},
+        {3795,  600},
+        {3715,  500},
+        {3640,  400},
+        {3570,  300},
+        {3490,  200},
+        {3390,  100},
+        {3250,   30},
+        {3050,    0},
+    };
+    const int n = (int)(sizeof(kCurve) / sizeof(kCurve[0]));
+    if (vocv_mv >= kCurve[0].mv) return 1000;
+    if (vocv_mv <= kCurve[n - 1].mv) return 0;
+    for (int i = 0; i < n - 1; i++) {
+        if (vocv_mv <= kCurve[i].mv && vocv_mv >= kCurve[i + 1].mv) {
+            int dv = kCurve[i].mv - kCurve[i + 1].mv;
+            int ds = kCurve[i].soc_x10 - kCurve[i + 1].soc_x10;
+            return kCurve[i + 1].soc_x10 + ((vocv_mv - kCurve[i + 1].mv) * ds) / dv;
+        }
+    }
+    return 500;
+}
+
+bool k230_pmic_poll_status(k230_pmic_status_t *out_status)
+{
+    static bool s_soc_initialized = false;
+    static double s_tracked_soc = 0.0;
+
+    if (!out_status) return false;
+    memset(out_status, 0, sizeof(*out_status));
+    out_status->full_cap_mah = 13600; /* 2x Vapcell G68 21700 6800mAh in 1S2P parallel */
+
+    int fd = ensure_i2c4_open();
+    if (fd <= 0) return false;
+
+    if (!s_bq25896_adc_started) {
+        uint8_t r02 = 0;
+        if (i2c4_read_bytes(fd, 0x6B, 0x02, &r02, 1) == 0) {
+            /* Enable CONV_START (bit 7) + CONV_RATE 1s continuous (bit 6) */
+            i2c4_write_reg_byte(fd, 0x6B, 0x02, (uint8_t)(r02 | 0xC0));
+            s_bq25896_adc_started = true;
+        }
+    }
+
+    uint8_t r0b = 0, r0e = 0, r11 = 0, r12 = 0;
+    if (i2c4_read_bytes(fd, 0x6B, 0x0B, &r0b, 1) != 0) {
+        return false;
+    }
+    out_status->valid = true;
+    out_status->charge_state = (r0b >> 3) & 0x03;
+    bool pg_stat = ((r0b >> 2) & 0x01) != 0;
+
+    if (i2c4_read_bytes(fd, 0x6B, 0x0E, &r0e, 1) == 0) {
+        int raw_vbat = (int)(r0e & 0x7F);
+        out_status->vbat_mv = (raw_vbat > 0) ? (2304 + raw_vbat * 20) : 0;
+    }
+    if (i2c4_read_bytes(fd, 0x6B, 0x11, &r11, 1) == 0) {
+        bool vbus_gd = ((r11 >> 7) & 0x01) != 0;
+        int raw_vbus = (int)(r11 & 0x7F);
+        out_status->usb_present = vbus_gd || pg_stat || (out_status->charge_state != 0);
+        out_status->vbus_mv = out_status->usb_present ? (2600 + raw_vbus * 100) : 0;
+    } else {
+        out_status->usb_present = pg_stat || (out_status->charge_state != 0);
+    }
+
+    int ichg_ma = 0;
+    if (i2c4_read_bytes(fd, 0x6B, 0x12, &r12, 1) == 0) {
+        ichg_ma = (int)(r12 & 0x7F) * 50;
+    }
+
+    /* Query BQ27220 fuel gauge (0x55) for StateOfCharge (0x2C), Voltage (0x08), and Current (0x0C) */
+    uint8_t soc_buf[2] = {0, 0};
+    if (i2c4_read_bytes(fd, 0x55, 0x2C, soc_buf, 2) == 0) {
+        int soc = (int)((soc_buf[1] << 8) | soc_buf[0]);
+        if (soc >= 0 && soc <= 100) {
+            out_status->raw_gauge_soc = soc;
+        }
+    }
+    uint8_t v_buf[2] = {0, 0};
+    if (i2c4_read_bytes(fd, 0x55, 0x08, v_buf, 2) == 0) {
+        int mv = (int)((v_buf[1] << 8) | v_buf[0]);
+        if (mv >= 2500 && mv <= 4500) {
+            out_status->vbat_mv = mv;
+        }
+    }
+    uint8_t i_buf[2] = {0, 0};
+    bool got_gauge_curr = false;
+    if (i2c4_read_bytes(fd, 0x55, 0x0C, i_buf, 2) == 0) {
+        int16_t cur_ma = (int16_t)((i_buf[1] << 8) | i_buf[0]);
+        if (cur_ma >= -6000 && cur_ma <= 6000) {
+            out_status->ibat_ma = (int)cur_ma;
+            got_gauge_curr = true;
+        }
+    }
+    if ((!got_gauge_curr || out_status->ibat_ma == 0) && ichg_ma > 0 &&
+        (out_status->charge_state == 1 || out_status->charge_state == 2)) {
+        out_status->ibat_ma = ichg_ma;
+    }
+
+    /* Compute IR-compensated open-circuit voltage (Vocv = Vbat - Ibat * R_path)
+     * R_path ~= 65 mOhm (parallel 21700 cells + spring holder contacts + protection FETs) */
+    int ir_drop_mv = (out_status->ibat_ma * 65) / 1000;
+    if (ir_drop_mv > 180) ir_drop_mv = 180;
+    if (ir_drop_mv < -180) ir_drop_mv = -180;
+    out_status->vocv_mv = (out_status->vbat_mv > 0) ? (out_status->vbat_mv - ir_drop_mv) : 0;
+
+    if (out_status->vocv_mv >= 2800) {
+        double ocv_soc = vapcell_g68_ocv_to_soc_x10(out_status->vocv_mv) / 10.0;
+        if (out_status->charge_state == 3 && out_status->vbat_mv >= 4120) {
+            ocv_soc = 100.0;
+        }
+        if (!s_soc_initialized) {
+            s_tracked_soc = ocv_soc;
+            s_soc_initialized = true;
+        } else {
+            /* Integrate real-time coulomb delta over ~1.0s poll interval for 13,600 mAh pack:
+             * dSOC(%) = (I_mA * 1.0s / 3600s) / 13600mAh * 100 = I_mA / 489600.0 */
+            double dsoc_coulomb = (double)out_status->ibat_ma / 489600.0;
+            s_tracked_soc += dsoc_coulomb;
+            /* Gently blend (2% per poll) toward IR-compensated Vapcell G68 OCV target */
+            s_tracked_soc = s_tracked_soc * 0.98 + ocv_soc * 0.02;
+        }
+        if (s_tracked_soc < 1.0 && out_status->vbat_mv > 3050) s_tracked_soc = 1.0;
+        if (s_tracked_soc < 0.0) s_tracked_soc = 0.0;
+        if (s_tracked_soc > 100.0) s_tracked_soc = 100.0;
+        out_status->soc_percent = (int)(s_tracked_soc + 0.5);
+    } else {
+        out_status->soc_percent = out_status->raw_gauge_soc;
+    }
+
+    out_status->rem_cap_mah = (out_status->full_cap_mah * out_status->soc_percent) / 100;
+    return true;
+}
+
+bool k230_pmic_power_off_ship_mode(void)
+{
+    int fd = ensure_i2c4_open();
+    if (fd <= 0) return false;
+    uint8_t r09 = 0;
+    if (i2c4_read_bytes(fd, 0x6B, 0x09, &r09, 1) != 0) {
+        return false;
+    }
+    /* Clear BATFET_DLY (bit 3) for immediate turn-off and set BATFET_DIS (bit 5) */
+    r09 &= (uint8_t)~(1 << 3);
+    r09 |= (uint8_t)(1 << 5);
+    return (i2c4_write_reg_byte(fd, 0x6B, 0x09, r09) == 0);
+}
  
 void control_keyboard_indicator_led_caps_lock(int is_open)
 {

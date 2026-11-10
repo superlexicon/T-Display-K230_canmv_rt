@@ -144,6 +144,36 @@ void lv_port_disp_init(void)
     lv_disp_drv_register(&disp_drv);
 }
 
+static volatile int g_disp_rotation = 0;
+
+int lexios_get_display_rotation(void)
+{
+    return g_disp_rotation;
+}
+
+void lexios_set_display_rotation(int rot)
+{
+    rot = rot & 3;
+    g_disp_rotation = rot;
+    lv_disp_t *disp = lv_disp_get_default();
+    if (!disp || !disp->driver) {
+        return;
+    }
+    lv_coord_t new_w = (rot == 1 || rot == 3) ? MY_DISP_VER_RES : MY_DISP_HOR_RES;
+    lv_coord_t new_h = (rot == 1 || rot == 3) ? MY_DISP_HOR_RES : MY_DISP_VER_RES;
+    if (disp->driver->hor_res != new_w || disp->driver->ver_res != new_h) {
+        disp->driver->hor_res = new_w;
+        disp->driver->ver_res = new_h;
+        lv_disp_drv_update(disp, disp->driver);
+    }
+    if (lv_scr_act()) {
+        lv_obj_invalidate(lv_scr_act());
+    }
+    if (lv_layer_top()) {
+        lv_obj_invalidate(lv_layer_top());
+    }
+}
+
 /**********************
  *   STATIC FUNCTIONS
  **********************/

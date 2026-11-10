@@ -24,6 +24,31 @@
 | T-Display-K230_canmv_rt_V1.1     | 2025-03-25       | update lora model（sx1262） |
 | T-Display-K230_canmv_rt_V1.2     | 2025-06-17       |  add ble  |
 | T-Display-K230_canmv_rt_V1.3     | 2026-02-10       | add lr2021 battery keyboard gps lte-m fan speaker aht20  |
+| T-Display-K230_canmv_rt_V1.4     | 2026-11-10       | RT-Smart kernel/LWP fixes, thermal DVFS, Pocket Standby, dynamic Landscape/Portrait rotation, rounded AMOLED safe areas, and Wi-Fi OTA daemon |
+
+## RT-Smart Kernel, Driver & UI Improvements (Early Adopter Fixes)
+
+This repository includes critical stability, power-management, and UI improvements for the **LilyGO T-Display-K230** (`RM69A10` 568×1232 AMOLED, `GT9895` touch, `TCA8418` + `BQ27220` + `SY6970` + `AHT20` on `I2C4`, `LR2021` Dual-Band LoRa/FLRC, `RTL8189FS` SDIO Wi-Fi):
+
+1. **RT-Smart Kernel `lwp_load()` Large-ELF Crash Fix (`lwp.c`):**
+   - Upstream `lwp_load()` staged ELFs up to `21.33 MB` (`CONFIG_MEM_RTSMART_HEAP_SIZE / 3`) into `/tmp/load_temp` (`dfs_tmpfs`), which calls `rt_realloc()` in `64 KB` increments on the `64 MB` kernel heap (`0x4000000`). Any ELF between ~`16 MB` and `21.33 MB` exhausted contiguous kernel heap during `rt_realloc()`, leaving `fd` at a partial offset without unlinking `/tmp/load_temp` or rewinding `fd` to `0`.
+   - Fixed `lwp_load()` to bypass `/tmp/load_temp` for ELFs `> 4 MB` and properly `unlink(tmp_file_name)` + `lseek(fd, 0, SEEK_SET)` on fallback.
+   - Note for pre-built stock kernels: keeping `app.elf` `> 21.33 MB` (e.g., unstripped with `-g`) also bypasses the broken `/tmp/load_temp` path on stock `rtt_system.bin` images.
+2. **Hardware CSPRNG (`/dev/urandom` & `/dev/random`) & `PROT_EXEC` `mmap` Support:**
+   - Added hardware TRNG / ChaCha20 CSPRNG character devices (`/dev/urandom`, `/dev/random`) and anonymous `PROT_EXEC` `mmap` support in the RT-Smart kernel for modern runtimes (Go, Rust, JITs).
+3. **Single Shared `/dev/i2c4` Descriptor & Non-Blocking PMIC Polling (`keyboard_ext.c`):**
+   - `SY6970` (`0x6A`), `BQ27220` (`0x55`), `TCA8418` (`0x34`), and `AHT20` (`0x38`) all share `/dev/i2c4`. Consolidated access onto a single shared file descriptor (`s_fd_i2c4`) instead of opening/closing `/dev/i2c4` per poll cycle, and removed blocking BQ27220 NVM flash writes from the LVGL UI timer.
+4. **Touchpad (`GT9895`) & Keypad (`TCA8418`) Input Registration Order (`port/lv_port_indev.c`):**
+   - Registered `LV_INDEV_TYPE_POINTER` (`touchpad_init()`) before `LV_INDEV_TYPE_KEYPAD` (`keypad_init()`) so `ESP_Brookesia_Phone` binds touch navigation properly.
+5. **Full-Screen Dynamic Portrait (`568×1232`) & Landscape (`1232×568`) Rotation + Rounded AMOLED Safe Areas:**
+   - Added hardware-accelerated `kd_mpi_vo_set_user_sync_info` / `LV_DISP_ROT_90` support with dual calibrated `ESP_Brookesia_PhoneStylesheet_t` stylesheets (`568×1232` Portrait and `1232×568` Landscape).
+   - Added `ESP_Brookesia_CoreManager::recalibrateAppsVisualArea()` so installed apps dynamically resize between `568×1176` and `1232×512` at runtime without clipping.
+   - Inset status bar icons, quick-settings drawer trigger, and app card margins to clear the physical ~`54 px` rounded glass corners of the 4.1" `RM69A10` AMOLED panel.
+6. **6-Stage Thermal DVFS, Unused Domain Power-Gating & Pocket Standby (`sample_display.cpp`):**
+   - Power-gates unused K230 AI/KPU/DPU/VPU domains at boot, implements 6-stage CPU1 DVFS thermal management via `/dev/tsensor`, and blanks the `RM69A10` panel in Pocket Standby while keeping `PM_GOVERNOR_AUTO` active so SDIO Wi-Fi stays connected.
+   - Physical `'0'` side button (`GPIO0` / `SW3`): short tap wakes screen or toggles Quick Settings; `1.5s` hold cycles Portrait/Landscape rotation; `4s` hold triggers full `SY6970` `BATFET_DIS` Ship Mode power-off.
+7. **Multi-Threaded Wi-Fi OTA & Remote Control Daemon (`sample_network.c` -> `k230_remoted.elf`):**
+   - Provides concurrent TCP (`2222`) & UDP (`2223`) OTA binary deployment (`PUT`, `GET`, `CRC32`, `LOG`, `STATUS`, `REBOOT`), staggered background daemon startup to avoid ElmFatFs (`_FS_REENTRANT = 0`) boot contention, and pulses `GPIO45` (`WIFI_3V3`) LOW for `150 ms` before watchdog reset so the `RTL8189FS` SDIO Wi-Fi chip cleanly re-enumerates on every soft reboot.
 ## PurchaseLink
 
 | Product                     | SOC           |  FLASH  |  LPDDR   | Link                   |

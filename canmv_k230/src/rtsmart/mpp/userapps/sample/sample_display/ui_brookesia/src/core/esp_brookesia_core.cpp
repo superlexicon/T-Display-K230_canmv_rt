@@ -313,6 +313,7 @@ void ESP_Brookesia_Core::onCoreDataUpdateEventCallback(lv_event_t *event)
     ESP_BROOKESIA_CHECK_NULL_EXIT(core, "Invalid core object");
 
     ESP_BROOKESIA_CHECK_FALSE_EXIT(core->_core_home.updateByNewData(), "Core home update failed");
+    core->_core_manager.recalibrateAppsVisualArea();
 }
 
 void ESP_Brookesia_Core::onCoreNavigateEventCallback(lv_event_t *event)

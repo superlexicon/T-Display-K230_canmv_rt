@@ -862,7 +862,10 @@ lv_timer_set_repeat_count(timer_battery_charge_monitor, -1);
 #endif
 
 #if defined(USING_BQ27220)
-//////////////init  modify capacity
+//////////////init  modify capacity (skip destructive reset if already 13600mAh)
+    uint8_t bq27220_dc_chk[2]={0,0};
+    bq27220_read_cmd_data(fd_i2c0,0x3C,bq27220_dc_chk,2);
+    if (((bq27220_dc_chk[1]<<8)|bq27220_dc_chk[0]) != 13600) {
     uint8_t bq27220_data1[2];
     printf("-----get operation status\n");
     //get operation status  0x3:seal 0x2:unseal 0x1: full access
@@ -959,7 +962,7 @@ lv_timer_set_repeat_count(timer_battery_charge_monitor, -1);
 //////////////////////////////////////////////////
 //set ffc
    {
-   int full_charge_capacity_new=10000;
+   int full_charge_capacity_new=13600;
     cmd_params1[0]=0x3E;
     cmd_params1[1]=0x9D;
     cmd_params1[2]=0x92;
@@ -991,7 +994,7 @@ int check_sum_fcc=255-((cmd_params1[1]+cmd_params1[2]+offset_fcc)%256);
   usleep(500000);
 //set design capacity
 {
-int design_capacity_new=10000;
+int design_capacity_new=13600;
     cmd_params1[0]=0x3E;
     cmd_params1[1]=0x9F;
     cmd_params1[2]=0x92;
@@ -1054,8 +1057,7 @@ int check_sum_dc=255-((cmd_params1[1]+cmd_params1[2]+offset_dc)%256);
     init_comp=((bq27220_data1[0]>>5)&0x01);
     cfg_update=((bq27220_data1[1]>>2)&0x01);
     printf("bq27220 operation status:%02x %02x,flag_seal:%d,init_comp:%d,cfg_update:%d\n",bq27220_data1[0],bq27220_data1[1],flag_seal,init_comp,cfg_update); 
-
-
+    }
 
 #endif
 

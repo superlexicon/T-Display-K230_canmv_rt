@@ -22,6 +22,7 @@
 //#include "app_sntp.h"
 #include "../../../../../network/network_rt_opt.h"
 #include "esp_brookesia_versions.h"
+extern "C" void lexios_set_wifi_ble_power(bool enable);
 
 #define ENABLE_DEBUG_LOG                (0)
 
@@ -329,7 +330,7 @@ void AppSettings::extraUiInit(void)
     lv_obj_add_event_cb(ui_ScreenSettingVerification, onScreenLoadEventCallback, LV_EVENT_SCREEN_LOADED, this);
 
     /* Bluetooth */
-    lv_obj_add_flag(ui_PanelSettingMainContainerItem2, LV_OBJ_FLAG_HIDDEN);//hide bluetooth func
+    lv_obj_clear_flag(ui_PanelSettingMainContainerItem2, LV_OBJ_FLAG_HIDDEN);//enable bluetooth func
     lv_obj_add_event_cb(ui_SwitchPanelScreenSettingBLESwitch, onSwitchPanelScreenSettingBLESwitchValueChangeEventCallback,
                         LV_EVENT_VALUE_CHANGED, this);
     // Record the screen index and install the screen loaded event callback
@@ -355,7 +356,7 @@ void AppSettings::extraUiInit(void)
     lv_obj_add_event_cb(ui_ScreenSettingVolume, onScreenLoadEventCallback, LV_EVENT_SCREEN_LOADED, this);
 
     /* About */
-    lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout4, "ESP_Brookesia");
+    lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout4, "LexiOS v1.0 (RT-Smart)");
     lv_obj_add_flag(ui_ButtonScreenSettingAboutReturn, LV_OBJ_FLAG_HIDDEN);
     // Record the screen index and install the screen loaded event callback
     _screen_list[UI_ABOUT_SETTING_INDEX] = ui_ScreenSettingAbout;
@@ -364,7 +365,7 @@ void AppSettings::extraUiInit(void)
     
     lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout3, mac_str);
     lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout5, "v0.2.0");
-    lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout2, "k230-Lilygo-Board");
+    lv_label_set_text(ui_LabelPanelPanelScreenSettingAbout2, "T-Display-K230 Sovereign");
     //lv_obj_set_x( ui_LabelPanelPanelScreenSettingAbout2, 167 );
 
     char char_ui_version[20];
@@ -917,6 +918,7 @@ void AppSettings::onSwitchPanelScreenSettingWiFiSwitchValueChangeEventCallback( 
 
     if (state & LV_STATE_CHECKED) {
     printf("wifi switch on\n");
+        lexios_set_wifi_ble_power(true);
         app->_nvs_param_map[NVS_KEY_WIFI_ENABLE] = true;
         app->setNvsParam(NVS_KEY_WIFI_ENABLE, 1);
         if (app->_screen_index == UI_WIFI_SCAN_INDEX) {
@@ -925,6 +927,7 @@ void AppSettings::onSwitchPanelScreenSettingWiFiSwitchValueChangeEventCallback( 
         }
     } else {
     printf("wifi switch off\n");
+        lexios_set_wifi_ble_power(false);
         app->_nvs_param_map[NVS_KEY_WIFI_ENABLE] = false;
         app->setNvsParam(NVS_KEY_WIFI_ENABLE, 0);
         if (app->_screen_index == UI_WIFI_SCAN_INDEX) {

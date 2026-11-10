@@ -37,6 +37,11 @@ void disp_enable_update(void);
  */
 void disp_disable_update(void);
 
+/* 0 = Portrait (0 deg, 568x1232), 1 = Landscape CW (90 deg, 1232x568),
+ * 2 = Portrait Flip (180 deg, 568x1232), 3 = Landscape CCW (270 deg, 1232x568) */
+void lexios_set_display_rotation(int rot);
+int lexios_get_display_rotation(void);
+
 /**********************
  *      MACROS
  **********************/

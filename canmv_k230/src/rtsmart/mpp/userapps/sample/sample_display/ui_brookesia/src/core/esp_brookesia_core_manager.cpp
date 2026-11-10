@@ -200,6 +200,13 @@ bool ESP_Brookesia_CoreManager::processAppRun(ESP_Brookesia_CoreApp *app)
 
     // Process home, and get the visual area of the app
     ESP_BROOKESIA_CHECK_FALSE_RETURN(is_home_run = home.processAppRun(app), false, "Process home before app run failed");
+    {
+        lv_area_t app_visual_area = {};
+        if (home.getAppVisualArea(app, app_visual_area)) {
+            app->setVisualArea(app_visual_area);
+            app->calibrateVisualArea();
+        }
+    }
 
     // Process app
     ESP_BROOKESIA_CHECK_FALSE_GOTO(is_app_run = app->processRun(), err, "Process app run failed");
@@ -239,6 +246,13 @@ bool ESP_Brookesia_CoreManager::processAppResume(ESP_Brookesia_CoreApp *app)
 
     // Process home
     ESP_BROOKESIA_CHECK_FALSE_RETURN(home.processAppResume(app), false, "Home process resume failed");
+    {
+        lv_area_t app_visual_area = {};
+        if (home.getAppVisualArea(app, app_visual_area)) {
+            app->setVisualArea(app_visual_area);
+            app->calibrateVisualArea();
+        }
+    }
 
     // Process app, only load active screen if the app is not shown
     ESP_BROOKESIA_CHECK_FALSE_RETURN(app->processResume(), false, "App process resume failed");
@@ -571,4 +585,26 @@ void ESP_Brookesia_CoreManager::onNavigationEventCallback(lv_event_t *event)
     ESP_BROOKESIA_CHECK_FALSE_EXIT(navigation_type < ESP_BROOKESIA_CORE_NAVIGATE_TYPE_MAX, "Invalid navigate type");
 
     ESP_BROOKESIA_CHECK_FALSE_EXIT(manager->processNavigationEvent(navigation_type), "Process navigation bar event failed");
+}
+
+bool ESP_Brookesia_CoreManager::recalibrateAppsVisualArea(void)
+{
+    ESP_Brookesia_CoreHome &home = _core._core_home;
+    for (auto &it : _id_installed_app_map) {
+        ESP_Brookesia_CoreApp *app = it.second;
+        if (!app) continue;
+        lv_area_t app_visual_area = {};
+        if (home.getAppVisualArea(app, app_visual_area)) {
+            app->setVisualArea(app_visual_area);
+            app->calibrateVisualArea();
+            lv_obj_t *act_scr = app->_active_screen;
+            if (act_scr && lv_obj_is_valid(act_scr)) {
+                lv_obj_set_pos(act_scr, app_visual_area.x1, app_visual_area.y1);
+                lv_obj_set_size(act_scr,
+                                app_visual_area.x2 - app_visual_area.x1 + 1,
+                                app_visual_area.y2 - app_visual_area.y1 + 1);
+            }
+        }
+    }
+    return true;
 }

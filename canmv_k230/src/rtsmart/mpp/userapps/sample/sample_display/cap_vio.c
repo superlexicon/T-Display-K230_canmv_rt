@@ -126,10 +126,13 @@ fpioa_set_function(35,GPIO35,-1,-1,-1,-1,-1,-1,-1);
     
 
 }
+static volatile int g_vo_brightness_scale = 256; /* 0..256 (256 = 100%) */
+
 void vo_display_set_brightness(int bright_val)
 {
-        (void)bright_val;
-        //kd_mpi_connector_set_brightness(connector_fd,bright_val);	
+    if (bright_val < 0) bright_val = 0;
+    if (bright_val > 100) bright_val = 100;
+    g_vo_brightness_scale = (bright_val * 256) / 100;
 }
 k_u32 vb_create_pool(k_u32 pool_blk_cnt,k_u64 pool_blk_size)
 {
@@ -368,30 +371,105 @@ void vo_config_manage(k_u32 pool_id,k_video_frame_info* vf_info,k_u8 **pic_addr_
 		 *pic_addr_cur =virt_addr;
 }
 
+extern int lexios_get_display_rotation(void);
+
+static inline uint32_t scale_bswap_argb(uint32_t lv_px, int scale)
+{
+    if (scale >= 256) {
+        return __builtin_bswap32(lv_px);
+    }
+    if (scale <= 0) {
+        return 0x000000FFu;
+    }
+    uint32_t r = (((lv_px >> 16) & 0xFFu) * (uint32_t)scale) >> 8;
+    uint32_t g = (((lv_px >> 8) & 0xFFu) * (uint32_t)scale) >> 8;
+    uint32_t b = ((lv_px & 0xFFu) * (uint32_t)scale) >> 8;
+    return (b << 24) | (g << 16) | (r << 8) | 0xFFu;
+}
+
 void vo_draw_color(k_vo_osd osd_vo_cur,k_video_frame_info* vf_info,k_u8 **pic_addr_cur,vo_area area, void * _px_map_color)
 {
     		 		 			 
 			 if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_ARGB_8888)
 			 {
-			     k_u8* px_map_color=(k_u8*)_px_map_color;
-				int i=0;
-				for(int y = area.y1; y <= area.y2; y++) 
-				{
-            			     for(int x = area.x1; x <= area.x2; x++) 
-            			     {
-            			        i=y*vf_info->v_frame.width+x;
-            			        k_u8 val_correct=px_map_color[0];
-            			        px_map_color[0]=px_map_color[3];
-            			        px_map_color[3]=val_correct;            			        
-            			        val_correct=px_map_color[1];
-            			        px_map_color[1]=px_map_color[2];
-            			        px_map_color[2]=val_correct;
-            			        
-            		                memcpy(((k_u8*)(*pic_addr_cur)+(i*4)),px_map_color,4);
-            		                memcpy(pic_addr+(i*4),px_map_color,4);            			       
-            				px_map_color=px_map_color+4;	
-            			     }
-        			} 	 
+			     const int rot = lexios_get_display_rotation();
+			     const int scale = g_vo_brightness_scale;
+			     if (rot == 0 && scale >= 256)
+			     {
+			         k_u8* px_map_color=(k_u8*)_px_map_color;
+			         int i=0;
+			         for(int y = area.y1; y <= area.y2; y++) 
+			         {
+			             for(int x = area.x1; x <= area.x2; x++) 
+			             {
+			                 i=y*vf_info->v_frame.width+x;
+			                 k_u8 val_correct=px_map_color[0];
+			                 px_map_color[0]=px_map_color[3];
+			                 px_map_color[3]=val_correct;            			        
+			                 val_correct=px_map_color[1];
+			                 px_map_color[1]=px_map_color[2];
+			                 px_map_color[2]=val_correct;
+			                 
+			                 memcpy(((k_u8*)(*pic_addr_cur)+(i*4)),px_map_color,4);
+			                 memcpy(pic_addr+(i*4),px_map_color,4);            			       
+			                 px_map_color=px_map_color+4;	
+			             }
+			         }
+			     }
+			     else
+			     {
+			         const uint32_t *src = (const uint32_t *)_px_map_color;
+			         uint32_t *dst = (uint32_t *)(pic_addr ? pic_addr : *pic_addr_cur);
+			         const int hw_w = (int)vf_info->v_frame.width;  /* 568 */
+			         const int hw_h = (int)vf_info->v_frame.height; /* 1232 */
+			         if (rot == 0) {
+			             for (int y = area.y1; y <= area.y2; y++) {
+			                 uint32_t *row_dst = dst + y * hw_w;
+			                 for (int x = area.x1; x <= area.x2; x++) {
+			                     row_dst[x] = scale_bswap_argb(*src++, scale);
+			                 }
+			             }
+			         } else if (rot == 2) {
+			             for (int y = area.y1; y <= area.y2; y++) {
+			                 uint32_t *row_dst = dst + (hw_h - 1 - y) * hw_w;
+			                 for (int x = area.x1; x <= area.x2; x++) {
+			                     row_dst[hw_w - 1 - x] = scale_bswap_argb(*src++, scale);
+			                 }
+			             }
+			         } else if (rot == 3) {
+			             /* 270 deg CCW Landscape (1232x568): hw_x = 567 - y, hw_y = x */
+			             for (int y = area.y1; y <= area.y2; y++) {
+			                 int hx = hw_w - 1 - y;
+			                 if (hx < 0 || hx >= hw_w) {
+			                     src += (area.x2 - area.x1 + 1);
+			                     continue;
+			                 }
+			                 for (int x = area.x1; x <= area.x2; x++) {
+			                     if (x >= 0 && x < hw_h) {
+			                         dst[x * hw_w + hx] = scale_bswap_argb(*src++, scale);
+			                     } else {
+			                         src++;
+			                     }
+			                 }
+			             }
+			         } else {
+			             /* 90 deg CW Landscape (1232x568): hw_x = y, hw_y = 1231 - x */
+			             for (int y = area.y1; y <= area.y2; y++) {
+			                 int hx = y;
+			                 if (hx < 0 || hx >= hw_w) {
+			                     src += (area.x2 - area.x1 + 1);
+			                     continue;
+			                 }
+			                 for (int x = area.x1; x <= area.x2; x++) {
+			                     if (x >= 0 && x < hw_h) {
+			                         dst[(hw_h - 1 - x) * hw_w + hx] = scale_bswap_argb(*src++, scale);
+			                     } else {
+			                         src++;
+			                     }
+			                 }
+			             }
+			         }
+			     }
 			 }
 			  else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_RGB_888)
 			 {
