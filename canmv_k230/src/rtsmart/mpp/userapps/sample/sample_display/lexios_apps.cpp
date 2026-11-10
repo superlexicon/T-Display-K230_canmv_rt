@@ -643,8 +643,8 @@ static void refresh_lexiapps_view(void)
         }
     }
 
-    bool node_up = check_port_listening(8545);
-    bool radio_up = (access("/tmp/os_thermal_state", F_OK) == 0);
+    bool node_up = (access("/tmp/slx_node_running", F_OK) == 0) || check_port_listening(8545);
+    bool radio_up = (access("/tmp/slx_radio_running", F_OK) == 0) || (access("/tmp/os_thermal_state", F_OK) == 0);
 
     char buf[1024];
     int off = snprintf(buf, sizeof(buf),
@@ -699,6 +699,33 @@ static void on_spawn_service_cb(lv_event_t *e)
 {
     const char *path = (const char *)lv_event_get_user_data(e);
     if (!path) return;
+
+    if (strstr(path, "superlexicon.elf")) {
+        int sfd = open("/tmp/slx_node_starting", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (sfd >= 0) close(sfd);
+        int fd = open("/tmp/slx_start_node", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            write(fd, "1\n", 2);
+            close(fd);
+        }
+        if (g_apps_action_lbl) {
+            lv_label_set_text(g_apps_action_lbl, "Requested supervisor to start lora_radio.elf & superlexicon.elf");
+        }
+        refresh_lexiapps_view();
+        return;
+    }
+    if (strstr(path, "lora_radio.elf")) {
+        int fd = open("/tmp/slx_start_radio", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            write(fd, "1\n", 2);
+            close(fd);
+        }
+        if (g_apps_action_lbl) {
+            lv_label_set_text(g_apps_action_lbl, "Requested supervisor to start lora_radio.elf");
+        }
+        refresh_lexiapps_view();
+        return;
+    }
 
     mkdir("/sdcard/apps", 0755);
     pid_t pid = fork();
