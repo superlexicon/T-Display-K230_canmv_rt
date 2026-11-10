@@ -40,6 +40,23 @@ void lexios_set_nrf9151_power(bool enable);
 bool lexios_get_wifi_ble_power(void);
 void lexios_set_wifi_ble_power(bool enable);
 
+/* Display, Orientation, Keyboard Backlight & Battery/Power Management API */
+int lexios_get_user_brightness_pct(void);
+void lexios_set_user_brightness_pct(int pct);
+int lexios_get_rot_mode(void);
+void lexios_set_rot_mode(int mode);
+int lexios_get_rot_flip(void);
+void lexios_set_rot_flip(int flip);
+int lexios_get_kb_backlight(void);
+void lexios_set_kb_backlight(int duty);
+bool lexios_get_battery_saver(void);
+void lexios_set_battery_saver(bool enable);
+void lexios_get_battery_telemetry(int *soc, int *vbat_mv, int *ibat_ma, int *rem_mah,
+                                  int *full_mah, int *chg_state, bool *usb_present,
+                                  bool *low_bat_throttled);
+void lexios_request_power_off(void);
+void lexios_request_reboot(void);
+
 #ifdef __cplusplus
 }
 

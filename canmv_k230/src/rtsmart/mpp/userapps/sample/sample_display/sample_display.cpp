@@ -49,6 +49,7 @@ static volatile long g_last_activity_sec = 0;
 static volatile long g_boot_time_sec = 0;
 static volatile bool g_nrf9151_power_on = false;
 static volatile bool g_wifi_ble_power_on = true;
+static volatile bool g_manual_battery_saver = false;
 static k230_pmic_status_t g_pmic_status = {false, false, 0, 85, 85, 3950, 3950, 0, 0, 13600, 11560};
 
 static void boot_log(const char *step) {
@@ -135,17 +136,23 @@ static void os_init_low_power_and_dvfs(void) {
 
 static int compute_target_dvfs_stage(int prev_stage, double temp) {
     // 6-step progressive hardware clock scaling with 3C hysteresis on step-down recovery
-    if (temp >= 74.0) return 5; // 200 MHz (-87.5% power)
-    if (prev_stage == 5 && temp >= 71.0) return 5;
-    if (temp >= 68.0) return 4; // 400 MHz (-75% power)
-    if (prev_stage >= 4 && temp >= 65.0) return 4;
-    if (temp >= 62.0) return 3; // 594 MHz (-63% power)
-    if (prev_stage >= 3 && temp >= 59.0) return 3;
-    if (temp >= 56.0) return 2; // 800 MHz (-50% power)
-    if (prev_stage >= 2 && temp >= 53.0) return 2;
-    if (temp >= 50.0) return 1; // 1188 MHz (-26% power)
-    if (prev_stage >= 1 && temp >= 47.0) return 1;
-    return 0;                   // AUTO (200 MHz idle <-> on-demand)
+    int stage = 0;
+    if (temp >= 74.0) stage = 5; // 200 MHz (-87.5% power)
+    else if (prev_stage == 5 && temp >= 71.0) stage = 5;
+    else if (temp >= 68.0) stage = 4; // 400 MHz (-75% power)
+    else if (prev_stage >= 4 && temp >= 65.0) stage = 4;
+    else if (temp >= 62.0) stage = 3; // 594 MHz (-63% power)
+    else if (prev_stage >= 3 && temp >= 59.0) stage = 3;
+    else if (temp >= 56.0) stage = 2; // 800 MHz (-50% power)
+    else if (prev_stage >= 2 && temp >= 53.0) stage = 2;
+    else if (temp >= 50.0) stage = 1; // 1188 MHz (-26% power)
+    else if (prev_stage >= 1 && temp >= 47.0) stage = 1;
+    else stage = 0;                   // AUTO (200 MHz idle <-> on-demand)
+
+    if (g_manual_battery_saver && stage < 3) {
+        stage = 3; // Cap at 594 MHz (-63% power) when Battery Saver is enabled
+    }
+    return stage;
 }
 
 static void apply_fan_state(double temp) {
@@ -212,9 +219,16 @@ extern "C" int lexios_get_sleep_timeout_sec(void) {
     return g_sleep_timeout_sec;
 }
 
+static void save_rotation_config(void);
+static void flush_rotation_config_to_sdcard(void);
+static void qs_refresh_ui(void);
+
 extern "C" void lexios_set_sleep_timeout_sec(int sec) {
     g_sleep_timeout_sec = sec;
     lexios_notify_user_activity();
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    qs_refresh_ui();
 }
 
 extern "C" uint64_t lexios_get_uptime_sec(void) {
@@ -387,18 +401,8 @@ static void *os_thermal_guardian_thread(void *arg) {
         }
         g_last_die_temp_c = temp;
 
-        // 1. Active fan control on GPIO42 (JP1 Pin 9) with hysteresis (ON >= 45C, OFF < 38C)
-        if (gpio_fd > 0) {
-            pin_gpio_t pin_42;
-            pin_42.pin = 42;
-            if (temp >= 45.0 && !fan_on) {
-                ioctl(gpio_fd, GPIO_WRITE_HIGH, &pin_42);
-                fan_on = true;
-            } else if (temp < 38.0 && fan_on) {
-                ioctl(gpio_fd, GPIO_WRITE_LOW, &pin_42);
-                fan_on = false;
-            }
-        }
+        // 1. Active fan control on GPIO42 (JP1 Pin 9) with hysteresis (ON >= 45C, OFF < 38C) & user mode override
+        apply_fan_state(temp);
 
         // 2. Progressive hardware CPU1 DVFS throttling (throttles ALL RT-Smart processes in hardware)
         int next_dvfs = compute_target_dvfs_stage(g_os_cpu_dvfs_stage, temp);
@@ -665,9 +669,9 @@ static void flush_rotation_config_to_sdcard(void) {
     g_rot_config_dirty = false;
     FILE *fp = fopen("/sdcard/display_rot.conf", "w");
     if (fp) {
-        fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\n",
+        fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\nBAT_SAVER=%d\n",
                 g_rot_mode, g_rot_flip_180, keyboard_get_backlight_level(),
-                g_user_brightness_pct, g_sleep_timeout_sec);
+                g_user_brightness_pct, g_sleep_timeout_sec, g_manual_battery_saver ? 1 : 0);
         fclose(fp);
     }
 }
@@ -676,9 +680,9 @@ static void save_rotation_config(void) {
     /* Write immediately to RAM tmpfs (/tmp) to avoid synchronous SD card contention during touch events */
     FILE *fp = fopen("/tmp/display_rot.conf", "w");
     if (fp) {
-        fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\n",
+        fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\nBAT_SAVER=%d\n",
                 g_rot_mode, g_rot_flip_180, keyboard_get_backlight_level(),
-                g_user_brightness_pct, g_sleep_timeout_sec);
+                g_user_brightness_pct, g_sleep_timeout_sec, g_manual_battery_saver ? 1 : 0);
         fclose(fp);
     }
     g_rot_config_dirty = true;
@@ -706,12 +710,22 @@ static void load_rotation_config(void) {
         } else if (strncmp(line, "TIMEOUT=", 8) == 0) {
             int t = atoi(line + 8);
             if (t == 0 || (t >= 15 && t <= 3600)) g_sleep_timeout_sec = t;
+        } else if (strncmp(line, "BAT_SAVER=", 10) == 0) {
+            g_manual_battery_saver = (atoi(line + 10) != 0);
         }
     }
     fclose(fp);
-    vo_display_set_brightness(g_user_brightness_pct);
+    if (g_manual_battery_saver) {
+        apply_cpu_dvfs_stage(3, g_last_die_temp_c);
+        vo_display_set_brightness(g_user_brightness_pct > 40 ? 40 : g_user_brightness_pct);
+    } else {
+        vo_display_set_brightness(g_user_brightness_pct);
+    }
     if (kb_light >= 0 && tca8418_is_connected()) {
         keyboard_set_backlight_level(kb_light);
+        if (g_manual_battery_saver) {
+            keyboard_set_backlight_sleep(true);
+        }
     }
 }
 
@@ -1018,6 +1032,131 @@ static void lexios_full_power_off(const char *reason) {
         pin_gpio_t p70 = {.pin = 70, .val = 0};
         ioctl(gpio_fd, GPIO_DM_OUTPUT, &p70);
         ioctl(gpio_fd, GPIO_WRITE_LOW, &p70);
+    }
+}
+
+extern "C" int lexios_get_user_brightness_pct(void) {
+    return g_user_brightness_pct;
+}
+
+extern "C" void lexios_set_user_brightness_pct(int pct) {
+    if (pct < 20) pct = 20;
+    if (pct > 100) pct = 100;
+    g_user_brightness_pct = pct;
+    g_screen_dimmed = false;
+    if (!g_screen_asleep) {
+        vo_display_set_brightness(pct);
+    }
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    qs_refresh_ui();
+    if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());
+    if (lv_layer_top()) lv_obj_invalidate(lv_layer_top());
+}
+
+extern "C" int lexios_get_rot_mode(void) {
+    return g_rot_mode;
+}
+
+extern "C" void lexios_set_rot_mode(int mode) {
+    if (mode < 0 || mode > 2) return;
+    g_rot_mode = mode;
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    apply_effective_rotation();
+}
+
+extern "C" int lexios_get_rot_flip(void) {
+    return g_rot_flip_180;
+}
+
+extern "C" void lexios_set_rot_flip(int flip) {
+    g_rot_flip_180 = flip ? 1 : 0;
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    apply_effective_rotation();
+}
+
+extern "C" int lexios_get_kb_backlight(void) {
+    return keyboard_get_backlight_level();
+}
+
+extern "C" void lexios_set_kb_backlight(int duty) {
+    keyboard_set_backlight_level(duty);
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    qs_refresh_ui();
+}
+
+extern "C" bool lexios_get_battery_saver(void) {
+    return g_manual_battery_saver;
+}
+
+extern "C" void lexios_set_battery_saver(bool enable) {
+    g_manual_battery_saver = enable;
+    if (enable) {
+        if (g_os_cpu_dvfs_stage < 3) {
+            apply_cpu_dvfs_stage(3, g_last_die_temp_c);
+        }
+        if (!g_screen_asleep && g_user_brightness_pct > 40) {
+            vo_display_set_brightness(40);
+        }
+        keyboard_set_backlight_sleep(true);
+    } else {
+        int next_stage = compute_target_dvfs_stage(0, g_last_die_temp_c);
+        apply_cpu_dvfs_stage(next_stage, g_last_die_temp_c);
+        if (!g_screen_asleep && !g_screen_dimmed && !g_low_bat_throttled) {
+            vo_display_set_brightness(g_user_brightness_pct);
+            keyboard_set_backlight_sleep(false);
+        }
+    }
+    save_rotation_config();
+    flush_rotation_config_to_sdcard();
+    qs_refresh_ui();
+}
+
+extern "C" void lexios_get_battery_telemetry(int *soc, int *vbat_mv, int *ibat_ma, int *rem_mah,
+                                             int *full_mah, int *chg_state, bool *usb_present,
+                                             bool *low_bat_throttled) {
+    if (soc) *soc = g_pmic_status.soc_percent;
+    if (vbat_mv) *vbat_mv = g_pmic_status.vbat_mv;
+    if (ibat_ma) *ibat_ma = g_pmic_status.ibat_ma;
+    if (rem_mah) *rem_mah = g_pmic_status.rem_cap_mah;
+    if (full_mah) *full_mah = g_pmic_status.full_cap_mah;
+    if (chg_state) *chg_state = g_pmic_status.charge_state;
+    if (usb_present) *usb_present = g_pmic_status.usb_present;
+    if (low_bat_throttled) *low_bat_throttled = g_low_bat_throttled;
+}
+
+extern "C" void lexios_request_power_off(void) {
+    lexios_full_power_off("Settings App Power Off");
+}
+
+#define CTRL_WDT_SET_TIMEOUT_OS _IOW('W', 2, int)
+#define CTRL_WDT_START_OS       _IOW('W', 5, int)
+
+extern "C" void lexios_request_reboot(void) {
+    flush_rotation_config_to_sdcard();
+    printf("[OS-PM] Hardware Reboot requested from Settings App...\n");
+    sync();
+    if (gpio_fd > 0) {
+        pin_gpio_t p45 = {.pin = 45, .val = 0};
+        ioctl(gpio_fd, GPIO_DM_OUTPUT, &p45);
+        ioctl(gpio_fd, GPIO_WRITE_LOW, &p45);
+        usleep(150000);
+        p45.val = 1;
+        ioctl(gpio_fd, GPIO_WRITE_HIGH, &p45);
+    }
+    const char *wdt_devs[2] = {"/dev/watchdog1", "/dev/watchdog0"};
+    for (int i = 0; i < 2; i++) {
+        int wfd = open(wdt_devs[i], O_RDWR);
+        if (wfd >= 0) {
+            unsigned int timeout = 1;
+            ioctl(wfd, CTRL_WDT_SET_TIMEOUT_OS, &timeout);
+            ioctl(wfd, CTRL_WDT_START_OS, NULL);
+            sleep(3);
+            close(wfd);
+        }
     }
 }
 

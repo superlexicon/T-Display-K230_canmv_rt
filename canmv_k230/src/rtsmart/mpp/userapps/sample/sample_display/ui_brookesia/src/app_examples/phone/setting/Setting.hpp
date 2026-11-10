@@ -8,8 +8,6 @@
 #include <array>
 #include <map>
 #include <string>
-//#include "esp_event.h"
-//#include "esp_wifi.h"
 #include "lvgl.h"
 #include "esp_brookesia.hpp"
 
@@ -35,6 +33,7 @@ private:
         UI_VOLUME_SETTING_INDEX,
         UI_BRIGHTNESS_SETTING_INDEX,
         UI_ABOUT_SETTING_INDEX,
+        UI_POWER_SETTING_INDEX,
         UI_MAX_INDEX,
     } SettingScreenIndex_t;
 
@@ -68,17 +67,9 @@ private:
     void startWifiScan(void);
     void stopWifiScan(void);
     void scanWifiAndUpdateUi(void);
-    // Smart Gadget
-    // void updateGadgetTime(struct tm timeinfo);
 
     /* Task */
-    //static void euiRefresTask(void *arg);
-    //static void wifiScanTask(void *arg);
     static void wifiConnectTask(void *arg);
-
-    /* Event Handler */
-    // WiFi
-    //static void wifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 
     /* UI Event Callback */
     // Main
@@ -86,10 +77,7 @@ private:
     // WiFi
     static void onSwitchPanelScreenSettingWiFiSwitchValueChangeEventCallback( lv_event_t * e);
     static void onButtonWifiListClickedEventCallback(lv_event_t * e);
-    //static void onKeyboardScreenSettingVerificationClickedEventCallback(lv_event_t *e);
     static void onKeyboardScreenSettingVerificationReadyCallback(lv_event_t *e);
-    
-    
     // Bluetooth
     static void onSwitchPanelScreenSettingBLESwitchValueChangeEventCallback( lv_event_t * e);
     // Audio

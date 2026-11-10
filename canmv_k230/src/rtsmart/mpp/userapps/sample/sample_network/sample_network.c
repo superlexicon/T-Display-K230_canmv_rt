@@ -194,15 +194,6 @@ static void load_wifi_conf(void) {
         }
         fclose(fp);
     }
-
-    if (g_wifi_cred_count == 0) {
-        snprintf(g_wifi_creds[0].ssid, sizeof(g_wifi_creds[0].ssid), "mano");
-        snprintf(g_wifi_creds[0].pass, sizeof(g_wifi_creds[0].pass), "");
-        snprintf(g_wifi_creds[1].ssid, sizeof(g_wifi_creds[1].ssid), "");
-        snprintf(g_wifi_creds[1].pass, sizeof(g_wifi_creds[1].pass), "");
-        g_wifi_cred_count = 2;
-        save_wifi_conf_locked();
-    }
     pthread_mutex_unlock(&g_wifi_mutex);
 }
 
@@ -948,6 +939,16 @@ static void *wifi_manager_thread(void *arg) {
         write_wifi_status_file();
 
         if (time(NULL) < g_manual_disconnect_until) {
+            usleep(250000);
+            continue;
+        }
+
+        if (g_wifi_cred_count == 0) {
+            /* No saved networks yet: scan once so the Settings Wi-Fi list is populated, then wait for user setup */
+            if (g_scan_seq == 0) {
+                perform_wifi_scan();
+                last_bg_scan = time(NULL);
+            }
             usleep(250000);
             continue;
         }
