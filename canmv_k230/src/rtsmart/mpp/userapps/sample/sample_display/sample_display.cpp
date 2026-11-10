@@ -648,8 +648,14 @@ static lv_obj_t *g_qs_poweroff_btn = NULL;
 static lv_obj_t *g_qs_poweroff_lbl = NULL;
 static bool g_qs_open = false;
 static bool g_qs_poweroff_confirm = false;
+static bool g_rot_config_dirty = false;
+static int g_last_qs_layout_w = 0;
+static int g_low_bat_crit_polls = 0;
+static bool g_low_bat_throttled = false;
 
-static void save_rotation_config(void) {
+static void flush_rotation_config_to_sdcard(void) {
+    if (!g_rot_config_dirty) return;
+    g_rot_config_dirty = false;
     FILE *fp = fopen("/sdcard/display_rot.conf", "w");
     if (fp) {
         fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\n",
@@ -659,8 +665,23 @@ static void save_rotation_config(void) {
     }
 }
 
+static void save_rotation_config(void) {
+    /* Write immediately to RAM tmpfs (/tmp) to avoid synchronous SD card contention during touch events */
+    FILE *fp = fopen("/tmp/display_rot.conf", "w");
+    if (fp) {
+        fprintf(fp, "MODE=%d\nFLIP=%d\nKB_LIGHT=%d\nBRIGHTNESS=%d\nTIMEOUT=%d\n",
+                g_rot_mode, g_rot_flip_180, keyboard_get_backlight_level(),
+                g_user_brightness_pct, g_sleep_timeout_sec);
+        fclose(fp);
+    }
+    g_rot_config_dirty = true;
+}
+
 static void load_rotation_config(void) {
-    FILE *fp = fopen("/sdcard/display_rot.conf", "r");
+    FILE *fp = fopen("/tmp/display_rot.conf", "r");
+    if (!fp) {
+        fp = fopen("/sdcard/display_rot.conf", "r");
+    }
     if (!fp) return;
     char line[64];
     int kb_light = -1;
@@ -712,17 +733,24 @@ static void qs_refresh_ui(void) {
                                : (g_rot_mode == ROT_MODE_LANDSCAPE ? "LANDSCAPE" : "PORTRAIT");
         char pbuf[32];
         snprintf(pbuf, sizeof(pbuf), "%s %s", mstr, g_qs_open ? "^" : "v");
-        lv_label_set_text(g_qs_pill_lbl, pbuf);
+        if (strcmp(lv_label_get_text(g_qs_pill_lbl), pbuf) != 0) {
+            lv_label_set_text(g_qs_pill_lbl, pbuf);
+        }
     }
     if (!g_qs_drawer) return;
 
     int cur_w = (int)lv_disp_get_hor_res(NULL);
-    if (g_qs_pill_btn) {
-        lv_obj_set_pos(g_qs_pill_btn, (cur_w > 700) ? 62 : 52, 10);
+    if (cur_w != g_last_qs_layout_w) {
+        g_last_qs_layout_w = cur_w;
+        if (g_qs_pill_btn) {
+            lv_obj_set_pos(g_qs_pill_btn, (cur_w > 700) ? 62 : 52, 10);
+        }
+        int drawer_w = (cur_w > 700) ? 760 : 512;
+        lv_obj_set_width(g_qs_drawer, drawer_w);
+        lv_obj_align(g_qs_drawer, LV_ALIGN_TOP_MID, 0, 62);
     }
-    int drawer_w = (cur_w > 700) ? 760 : 512;
-    lv_obj_set_width(g_qs_drawer, drawer_w);
-    lv_obj_align(g_qs_drawer, LV_ALIGN_TOP_MID, 0, 62);
+
+    if (!g_qs_open) return;
 
     if (g_qs_info_lbl) {
         char wifi_ip[32] = "Disconnected";
@@ -884,10 +912,9 @@ extern "C" void lexios_toggle_quick_settings(void) {
     g_qs_poweroff_confirm = false;
     if (g_qs_open) {
         lv_obj_clear_flag(g_qs_drawer, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(g_qs_drawer);
-        if (g_qs_pill_btn) lv_obj_move_foreground(g_qs_pill_btn);
     } else {
         lv_obj_add_flag(g_qs_drawer, LV_OBJ_FLAG_HIDDEN);
+        flush_rotation_config_to_sdcard();
     }
     qs_refresh_ui();
 }
@@ -952,6 +979,7 @@ static void lexios_full_power_off(const char *reason) {
     if (g_qs_open) {
         lexios_toggle_quick_settings();
     }
+    flush_rotation_config_to_sdcard();
     printf("[OS-PM] Full Power Off triggered (%s): syncing FS, blanking AMOLED, cutting RF & VDD_5V + BQ25896 Ship Mode...\n",
            reason ? reason : "user");
     sync();
@@ -1061,12 +1089,19 @@ static void on_qs_poweroff_clicked(lv_event_t *e) {
     lexios_full_power_off("Quick Settings Power Off");
 }
 
+static void detach_from_default_group(lv_obj_t *obj) {
+    if (obj && lv_group_get_default()) {
+        lv_group_remove_obj(obj);
+    }
+}
+
 static void init_quick_settings_drawer(void) {
     lv_obj_t *top = lv_layer_top();
     if (!top) return;
 
     /* Top-left status bar pill button inset inside rounded AMOLED corner safe zone */
     g_qs_pill_btn = lv_btn_create(top);
+    detach_from_default_group(g_qs_pill_btn);
     lv_obj_set_size(g_qs_pill_btn, 140, 36);
     lv_obj_set_pos(g_qs_pill_btn, 52, 10);
     lv_obj_set_style_bg_color(g_qs_pill_btn, lv_color_hex(0x0b1324), 0);
@@ -1084,6 +1119,7 @@ static void init_quick_settings_drawer(void) {
 
     /* Pull-down Quick Settings drawer on lv_layer_top() */
     g_qs_drawer = lv_obj_create(top);
+    detach_from_default_group(g_qs_drawer);
     lv_obj_set_size(g_qs_drawer, 512, 392);
     lv_obj_align(g_qs_drawer, LV_ALIGN_TOP_MID, 0, 62);
     lv_obj_set_style_bg_color(g_qs_drawer, lv_color_hex(0x0b1324), 0);
@@ -1101,6 +1137,7 @@ static void init_quick_settings_drawer(void) {
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lv_obj_t *close_btn = lv_btn_create(g_qs_drawer);
+    detach_from_default_group(close_btn);
     lv_obj_set_size(close_btn, 84, 28);
     lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, 0, -4);
     lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x1e293b), 0);
@@ -1133,6 +1170,7 @@ static void init_quick_settings_drawer(void) {
     static const char *kRotNames[4] = {"AUTO (KB)", "PORTRAIT", "LANDSCAPE", "FLIP 180"};
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = lv_btn_create(rot_row);
+        detach_from_default_group(b);
         lv_obj_set_height(b, 42);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_radius(b, 8, 0);
@@ -1158,6 +1196,7 @@ static void init_quick_settings_drawer(void) {
     static const int kBrtLevels[4] = {25, 50, 75, 100};
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = lv_btn_create(brt_row);
+        detach_from_default_group(b);
         lv_obj_set_height(b, 42);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_radius(b, 8, 0);
@@ -1183,6 +1222,7 @@ static void init_quick_settings_drawer(void) {
     static const int kSlpTimeouts[4] = {30, 60, 300, 0};
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = lv_btn_create(slp_row);
+        detach_from_default_group(b);
         lv_obj_set_height(b, 42);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_radius(b, 8, 0);
@@ -1208,6 +1248,7 @@ static void init_quick_settings_drawer(void) {
     static const int kKbDuties[4] = {0, 5, 25, 60};
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = lv_btn_create(kb_row);
+        detach_from_default_group(b);
         lv_obj_set_height(b, 42);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_radius(b, 8, 0);
@@ -1230,6 +1271,7 @@ static void init_quick_settings_drawer(void) {
     lv_obj_set_style_pad_column(act_row, 10, 0);
 
     lv_obj_t *slp_now_btn = lv_btn_create(act_row);
+    detach_from_default_group(slp_now_btn);
     lv_obj_set_height(slp_now_btn, 44);
     lv_obj_set_flex_grow(slp_now_btn, 1);
     lv_obj_set_style_radius(slp_now_btn, 8, 0);
@@ -1243,6 +1285,7 @@ static void init_quick_settings_drawer(void) {
     lv_obj_center(slp_now_lbl);
 
     g_qs_poweroff_btn = lv_btn_create(act_row);
+    detach_from_default_group(g_qs_poweroff_btn);
     lv_obj_set_height(g_qs_poweroff_btn, 44);
     lv_obj_set_flex_grow(g_qs_poweroff_btn, 1);
     lv_obj_set_style_radius(g_qs_poweroff_btn, 8, 0);
@@ -1287,7 +1330,7 @@ static void on_clock_update_timer_cb(struct _lv_timer_t *t)
         }
         phone->getHome().getStatusBar()->setWifiIconState(wifi_state);
     }
-    /* Poll BQ25896 charger + BQ27220 fuel gauge every 2 ticks */
+    /* Poll BQ25896 charger + BQ27220 fuel gauge every 2 ticks & enforce Two-Stage Low-Battery UVLO Guardian */
     {
         static int pmic_div = 0;
         pmic_div = (pmic_div + 1) & 1;
@@ -1305,16 +1348,76 @@ static void on_clock_update_timer_cb(struct _lv_timer_t *t)
                         lexios_notify_user_activity();
                     }
                 }
+
+                /* Two-Stage Low-Battery Brownout Prevention & Automatic Graceful Shutdown (UVLO Guardian) */
+                bool on_battery_discharging = !g_pmic_status.usb_present && !is_chg &&
+                                              (g_pmic_status.vbat_mv >= 2500);
+                if (on_battery_discharging) {
+                    /* Stage 1 (<= 10% SOC or VBAT <= 3420 mV): Pre-emptive brownout prevention
+                     * Cap AMOLED brightness to <= 30%, turn off keyboard LED, and step CPU1 down to <= 594 MHz
+                     * so transient current spikes cannot pull VSYS below the regulator dropout voltage. */
+                    if (g_pmic_status.soc_percent <= 10 || g_pmic_status.vbat_mv <= 3420) {
+                        if (!g_low_bat_throttled) {
+                            g_low_bat_throttled = true;
+                            printf("[OS-PM] LOW BATTERY WARNING: VBAT=%dmV (Vocv=%dmV) SOC=%d%% -> Capping AMOLED <=30%% & CPU1 <=594MHz to prevent brownout\n",
+                                   g_pmic_status.vbat_mv, g_pmic_status.vocv_mv, g_pmic_status.soc_percent);
+                            if (!g_screen_asleep && g_user_brightness_pct > 30) {
+                                vo_display_set_brightness(30);
+                            }
+                            keyboard_set_backlight_sleep(true);
+                            if (g_os_cpu_dvfs_stage < 3) {
+                                apply_cpu_dvfs_stage(3, g_last_die_temp_c);
+                            }
+                        }
+                    } else if (g_low_bat_throttled && g_pmic_status.soc_percent >= 14 && g_pmic_status.vbat_mv >= 3520) {
+                        g_low_bat_throttled = false;
+                        if (!g_screen_asleep && !g_screen_dimmed) {
+                            vo_display_set_brightness(g_user_brightness_pct);
+                            keyboard_set_backlight_sleep(false);
+                        }
+                    }
+
+                    /* Stage 2 (<= 4% SOC or VBAT <= 3320 mV sustained for 3 polls (~6s), or immediate <= 3220 mV):
+                     * Graceful OS shutdown into BQ25896 Ship Mode + VDD_5V cut BEFORE voltage sags into brownout! */
+                    if (g_pmic_status.vbat_mv <= 3220) {
+                        g_low_bat_crit_polls = 3;
+                    } else if (g_pmic_status.soc_percent <= 4 || g_pmic_status.vbat_mv <= 3320) {
+                        g_low_bat_crit_polls++;
+                        printf("[OS-PM] CRITICAL BATTERY (%d/3): VBAT=%dmV (Vocv=%dmV) SOC=%d%%\n",
+                               g_low_bat_crit_polls, g_pmic_status.vbat_mv, g_pmic_status.vocv_mv, g_pmic_status.soc_percent);
+                    } else {
+                        g_low_bat_crit_polls = 0;
+                    }
+
+                    if (g_low_bat_crit_polls >= 3) {
+                        lexios_full_power_off("Critical Low Battery UVLO (<3.32V / <=4%)");
+                        return;
+                    }
+                } else {
+                    g_low_bat_crit_polls = 0;
+                    if (g_low_bat_throttled && (g_pmic_status.usb_present || is_chg)) {
+                        g_low_bat_throttled = false;
+                        if (!g_screen_asleep && !g_screen_dimmed) {
+                            vo_display_set_brightness(g_user_brightness_pct);
+                            keyboard_set_backlight_sleep(false);
+                        }
+                    }
+                }
             }
         }
     }
     /* Hot-plug poll for physical keyboard module on I2C4 (0x34) & auto-rotate */
     {
+        static int kb_poll_div = 0;
         bool prev_kb = tca8418_is_connected();
-        bool now_kb = tca8418_poll_presence();
+        bool now_kb = prev_kb;
+        kb_poll_div = (kb_poll_div + 1) & 3;
+        if (prev_kb || kb_poll_div == 0 || g_applied_hw_rot < 0) {
+            now_kb = tca8418_poll_presence();
+        }
         if (prev_kb != now_kb || g_applied_hw_rot < 0) {
             apply_effective_rotation();
-        } else {
+        } else if (g_qs_open) {
             qs_refresh_ui();
         }
     }

@@ -597,12 +597,14 @@ bool ESP_Brookesia_CoreManager::recalibrateAppsVisualArea(void)
         if (home.getAppVisualArea(app, app_visual_area)) {
             app->setVisualArea(app_visual_area);
             app->calibrateVisualArea();
-            lv_obj_t *act_scr = app->_active_screen;
-            if (act_scr && lv_obj_is_valid(act_scr)) {
-                lv_obj_set_pos(act_scr, app_visual_area.x1, app_visual_area.y1);
-                lv_obj_set_size(act_scr,
-                                app_visual_area.x2 - app_visual_area.x1 + 1,
-                                app_visual_area.y2 - app_visual_area.y1 + 1);
+            if (getRunningAppById(app->getId()) != nullptr) {
+                lv_obj_t *act_scr = app->_active_screen;
+                if (act_scr && lv_obj_is_valid(act_scr)) {
+                    lv_obj_set_pos(act_scr, app_visual_area.x1, app_visual_area.y1);
+                    lv_obj_set_size(act_scr,
+                                    app_visual_area.x2 - app_visual_area.x1 + 1,
+                                    app_visual_area.y2 - app_visual_area.y1 + 1);
+                }
             }
         }
     }
