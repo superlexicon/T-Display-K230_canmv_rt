@@ -135,6 +135,14 @@ static void os_init_low_power_and_dvfs(void) {
 }
 
 static int compute_target_dvfs_stage(int prev_stage, double temp) {
+    // Keep CPU1 at full speed (AUTO -> up to 1.6 GHz on-demand) during the first 35s of boot
+    // and while superlexicon.elf (35 MB) is loading/starting, unless die temp is critical (>= 70 C).
+    long now = monotonic_sec_now();
+    if (g_boot_time_sec == 0) g_boot_time_sec = now;
+    if (temp < 70.0 && ((now - g_boot_time_sec) < 35 || access("/tmp/slx_node_starting", F_OK) == 0)) {
+        return 0;
+    }
+
     // 6-step progressive hardware clock scaling with 3C hysteresis on step-down recovery
     int stage = 0;
     if (temp >= 74.0) stage = 5; // 200 MHz (-87.5% power)

@@ -1437,9 +1437,9 @@ int main(int argc, char *argv[]) {
 
     /* Spawn clean single-threaded launcher for lora_radio.elf & superlexicon.elf
      * BEFORE opening Wi-Fi/socket FDs so children inherit zero network handles.
-     * Auto-starts after 16s (or immediately if the user presses Start in the UI).
-     * Calls execv() directly in bg_pid so no extra supervisor process or broken
-     * RT-Smart waitpid()/unlink("/tmp/load_temp") race occurs during ELF paging. */
+     * Pre-creates /tmp/slx_node_starting and pre-allocates the 256 KB /tmp/slx_ipc.bin
+     * region immediately so tmpfs never reallocates while multiple processes access it.
+     * Auto-starts after 4s (or immediately within 100ms if the user opens SuperLexicon). */
     {
         pid_t bg_pid = fork();
         if (bg_pid == 0) {
@@ -1448,23 +1448,33 @@ int main(int argc, char *argv[]) {
             unlink("/tmp/slx_start_radio");
             unlink("/tmp/slx_stop_node");
             unlink("/tmp/slx_node_running");
-            unlink("/tmp/slx_node_starting");
             unlink("/tmp/slx_radio_running");
             unlink("/tmp/slx_ipc.bin");
             unlink("/tmp/load_temp");
 
-            /* Wait up to 16s for UI & Wi-Fi auto-reconnect to settle on boot, or wake
-             * immediately if the user taps the Start SuperLexicon Node button in the UI. */
-            for (int i = 0; i < 80; i++) {
+            int sfd = open("/tmp/slx_node_starting", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (sfd >= 0) close(sfd);
+
+            /* Pre-allocate the full 262,144-byte /tmp/slx_ipc.bin before any reader
+             * or writer opens it, avoiding concurrent dfs_tmpfs_write rt_realloc() races. */
+            int ifd = open("/tmp/slx_ipc.bin", O_CREAT | O_RDWR | O_TRUNC, 0666);
+            if (ifd >= 0) {
+                static const uint8_t zero_page[4096] = {0};
+                for (int p = 0; p < 64; p++) {
+                    write(ifd, zero_page, sizeof(zero_page));
+                }
+                close(ifd);
+            }
+
+            /* Wait up to 4s for UI & Wi-Fi auto-reconnect to initiate on boot, or wake
+             * immediately if the user opens the SuperLexicon app or taps Start. */
+            for (int i = 0; i < 40; i++) {
                 if (access("/tmp/slx_start_node", F_OK) == 0) {
                     unlink("/tmp/slx_start_node");
                     break;
                 }
-                usleep(200000);
+                usleep(100000);
             }
-
-            int sfd = open("/tmp/slx_node_starting", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-            if (sfd >= 0) close(sfd);
 
             struct stat st;
             if (stat("/sdcard/lora_radio.elf", &st) == 0) {
@@ -1483,7 +1493,7 @@ int main(int argc, char *argv[]) {
                         close(rfd);
                     }
                 }
-                sleep(3);
+                sleep(1);
                 unlink("/tmp/load_temp");
             }
 
