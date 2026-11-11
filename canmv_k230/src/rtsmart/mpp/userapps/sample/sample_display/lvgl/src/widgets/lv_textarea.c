@@ -408,6 +408,7 @@ void lv_textarea_set_password_mode(lv_obj_t * obj, bool en)
     lv_textarea_t * ta = (lv_textarea_t *)obj;
     if(ta->pwd_mode == en) return;
 
+    lv_anim_del(ta, pwd_char_hider_anim);
     ta->pwd_mode = en ? 1U : 0U;
     /*Pwd mode is now enabled*/
     if(en) {
@@ -427,9 +428,11 @@ void lv_textarea_set_password_mode(lv_obj_t * obj, bool en)
     /*Pwd mode is now disabled*/
     else {
         lv_textarea_clear_selection(obj);
-        lv_label_set_text(ta->label, ta->pwd_tmp);
-        lv_mem_free(ta->pwd_tmp);
-        ta->pwd_tmp = NULL;
+        lv_label_set_text(ta->label, ta->pwd_tmp ? ta->pwd_tmp : "");
+        if(ta->pwd_tmp) {
+            lv_mem_free(ta->pwd_tmp);
+            ta->pwd_tmp = NULL;
+        }
     }
 
     refr_cursor_area(obj);

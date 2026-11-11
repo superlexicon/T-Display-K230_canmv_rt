@@ -285,6 +285,8 @@ void tca8418_init()
 	}
 
 }
+static int s_kb_fail_streak = 0;
+
 bool tca8418_is_connected()
 {
     return s_kb_connected && (fd_keyboard > 0);
@@ -299,17 +301,28 @@ bool tca8418_poll_presence(void)
     }
     if (s_kb_connected && fd_keyboard > 0) {
         if (tca8418_read_reg(fd_keyboard, 0x01, &reg_data, 1) != 0) {
-            s_kb_connected = false;
-            fd_keyboard = -1;
-            printf("[KB] Keyboard detached from I2C4\n");
-            return false;
+            /* Retry once immediately in case of transient I2C4 bus contention */
+            usleep(2000);
+            if (tca8418_read_reg(fd_keyboard, 0x01, &reg_data, 1) != 0) {
+                s_kb_fail_streak++;
+                if (s_kb_fail_streak >= 8) {
+                    s_kb_connected = false;
+                    fd_keyboard = -1;
+                    s_kb_fail_streak = 0;
+                    printf("[KB] Keyboard detached from I2C4\n");
+                    return false;
+                }
+                return true;
+            }
         }
+        s_kb_fail_streak = 0;
         return true;
     } else {
         int ret = tca8418_read_reg(fd, 0x01, &reg_data, 1);
         if (ret == 0) {
             tca8418_init();
             if (s_kb_connected && fd_keyboard > 0) {
+                s_kb_fail_streak = 0;
                 control_keyboard_backlight(20000, g_kb_backlight_duty);
                 printf("[KB] Keyboard hot-plugged and initialized on I2C4\n");
                 return true;
@@ -334,8 +347,10 @@ uint32_t tca8418_get_key()
      }
    uint32_t key_code=0x00;
     //int ret;
-    uint8_t reg_data;    
-    tca8418_read_reg(fd_keyboard, 0x02,&reg_data,1);//_INT_STAT
+    uint8_t reg_data = 0;
+    if (tca8418_read_reg(fd_keyboard, 0x02, &reg_data, 1) == 0) {//_INT_STAT
+        s_kb_fail_streak = 0;
+    }
     if((reg_data&0x01)==0x01)
     { 
     tca8418_read_reg(fd_keyboard, 0x03,&reg_data,1);//KEY_LCK_EC

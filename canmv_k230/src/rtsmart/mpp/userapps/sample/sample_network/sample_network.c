@@ -683,6 +683,10 @@ static int connect_to_ap(const char *ssid, const char *pass, bool is_manual) {
     network_rt_wlan_set_auto_reconnect(0);
 
     int rc = network_rt_wlan_connect((char *)ssid, (char *)(pass ? pass : ""));
+    if (rc != 0) {
+        usleep(350000);
+        rc = network_rt_wlan_connect((char *)ssid, (char *)(pass ? pass : ""));
+    }
     if (rc == 0) {
         snprintf(g_current_ssid, sizeof(g_current_ssid), "%s", ssid);
         set_net_ifconfig_dhcp(0);
@@ -956,7 +960,10 @@ static void *wifi_manager_thread(void *arg) {
         }
 
         /* Active Scan & Auto-Reconnect to Saved Network in Range with Strongest Signal (RSSI) */
-        perform_wifi_scan();
+        if (perform_wifi_scan() == 0) {
+            usleep(800000);
+            perform_wifi_scan();
+        }
         last_bg_scan = time(NULL);
         if (process_wifi_cmd_file()) continue;
 
@@ -1416,7 +1423,7 @@ int main(int argc, char *argv[]) {
     (void)argv;
     /* Let app.elf finish LVGL & home screen initialization without SD card FatFs contention */
     if (!(argc > 1 && strcmp(argv[1], "--provision") == 0)) {
-        sleep(8);
+        sleep(4);
     }
     unlink("/tmp/load_temp");
     g_boot_time = time(NULL);
@@ -1430,7 +1437,7 @@ int main(int argc, char *argv[]) {
 
     /* Spawn clean single-threaded launcher for lora_radio.elf & superlexicon.elf
      * BEFORE opening Wi-Fi/socket FDs so children inherit zero network handles.
-     * Auto-starts after 12s (or immediately if the user presses Start in the UI).
+     * Auto-starts after 16s (or immediately if the user presses Start in the UI).
      * Calls execv() directly in bg_pid so no extra supervisor process or broken
      * RT-Smart waitpid()/unlink("/tmp/load_temp") race occurs during ELF paging. */
     {
@@ -1446,9 +1453,9 @@ int main(int argc, char *argv[]) {
             unlink("/tmp/slx_ipc.bin");
             unlink("/tmp/load_temp");
 
-            /* Wait up to 12s for UI & Wi-Fi to settle on boot, or wake immediately
-             * if the user taps the Start SuperLexicon Node button in the UI. */
-            for (int i = 0; i < 60; i++) {
+            /* Wait up to 16s for UI & Wi-Fi auto-reconnect to settle on boot, or wake
+             * immediately if the user taps the Start SuperLexicon Node button in the UI. */
+            for (int i = 0; i < 80; i++) {
                 if (access("/tmp/slx_start_node", F_OK) == 0) {
                     unlink("/tmp/slx_start_node");
                     break;
@@ -1505,7 +1512,7 @@ int main(int argc, char *argv[]) {
 
     /* U-Boot already pulls IO45_WIFI_EN (GPIO45) HIGH so U24 (WIFI_3V3) powers RTL8189 continuously from boot.
      * NEVER call ioctl(GPIO_DM_OUTPUT) on GPIO45 here, as DATA_OUTPUT defaults to 0 and glitches WIFI_3V3 LOW! */
-    sleep(2);
+    sleep(1);
 
     if (network_rt_init() < 0) {
         remoted_log("WARN: first network_rt_init failed, retrying in 2s...");

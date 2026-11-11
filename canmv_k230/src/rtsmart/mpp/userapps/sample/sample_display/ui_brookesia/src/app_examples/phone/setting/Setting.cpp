@@ -69,6 +69,10 @@ static lv_obj_t *wifi_connect[SCAN_LIST_SIZE];
 static ui_wifi_ap_t s_scan_aps[SCAN_LIST_SIZE];
 static int s_scan_ap_count = 0;
 static int s_selected_ap_idx = -1;
+static char s_selected_ap_ssid[64] = "";
+static char s_selected_ap_saved_pass[64] = "";
+static bool s_selected_ap_secured = true;
+static bool s_selected_ap_saved = false;
 
 static lv_obj_t *s_label_wifi_header_sub = nullptr;
 static lv_obj_t *s_btn_wifi_rescan = nullptr;
@@ -403,8 +407,12 @@ static void adapt_verification_screen_geometry(void)
     }
     if (ui_KeyboardScreenSettingVerification) {
         if (hw_kb) {
+            lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, nullptr);
             lv_obj_add_flag(ui_KeyboardScreenSettingVerification, LV_OBJ_FLAG_HIDDEN);
         } else {
+            if (ui_TextAreaScreenSettingVerificationPassword) {
+                lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, ui_TextAreaScreenSettingVerificationPassword);
+            }
             lv_obj_clear_flag(ui_KeyboardScreenSettingVerification, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_width(ui_KeyboardScreenSettingVerification, lv_pct(98));
             lv_obj_set_height(ui_KeyboardScreenSettingVerification, is_landscape ? 235 : 360);
@@ -668,10 +676,10 @@ static void on_verify_eye_clicked_cb(lv_event_t *e)
 static void on_verify_forget_clicked_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_selected_ap_idx >= 0 && s_selected_ap_idx < s_scan_ap_count) {
+    if (s_selected_ap_ssid[0] != '\0') {
         char cmd[128];
-        if (s_scan_aps[s_selected_ap_idx].saved) {
-            snprintf(cmd, sizeof(cmd), "FORGET %s", s_scan_aps[s_selected_ap_idx].ssid);
+        if (s_selected_ap_saved) {
+            snprintf(cmd, sizeof(cmd), "FORGET %s", s_selected_ap_ssid);
         } else {
             snprintf(cmd, sizeof(cmd), "DISCONNECT");
         }
@@ -1135,8 +1143,14 @@ void AppSettings::extraUiInit(void)
     processWifiConnect(WIFI_CONNECT_HIDE);
 
     lv_textarea_set_one_line(ui_TextAreaScreenSettingVerificationPassword, true);
+    lv_textarea_set_password_show_time(ui_TextAreaScreenSettingVerificationPassword, 0);
     lv_textarea_set_password_mode(ui_TextAreaScreenSettingVerificationPassword, true);
-    lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, ui_TextAreaScreenSettingVerificationPassword);
+    if (!tca8418_is_connected()) {
+        lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, ui_TextAreaScreenSettingVerificationPassword);
+    } else {
+        lv_keyboard_set_textarea(ui_KeyboardScreenSettingVerification, nullptr);
+        lv_obj_add_flag(ui_KeyboardScreenSettingVerification, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_event_cb(ui_KeyboardScreenSettingVerification, onKeyboardScreenSettingVerificationReadyCallback, LV_EVENT_READY, this);
     lv_obj_add_event_cb(ui_TextAreaScreenSettingVerificationPassword, onKeyboardScreenSettingVerificationReadyCallback, LV_EVENT_READY, this);
 
@@ -1639,7 +1653,7 @@ void AppSettings::scanWifiAndUpdateUi(void)
                 s_connect_result_state = -1;
                 s_connect_result_tick = now_tick;
                 processWifiConnect(WIFI_CONNECT_FAIL);
-            } else if (elapsed >= 15000) {
+            } else if (elapsed >= 25000) {
                 s_connect_result_state = -1;
                 s_connect_result_tick = now_tick;
                 processWifiConnect(WIFI_CONNECT_FAIL);
@@ -1796,13 +1810,16 @@ void AppSettings::onKeyboardScreenSettingVerificationReadyCallback(lv_event_t *e
     ESP_BROOKESIA_CHECK_NULL_GOTO(app, end, "Invalid app pointer");
 
     {
-        const char *ssid = (s_selected_ap_idx >= 0 && s_selected_ap_idx < s_scan_ap_count)
-                           ? s_scan_aps[s_selected_ap_idx].ssid
+        const char *ssid = (s_selected_ap_ssid[0] != '\0')
+                           ? s_selected_ap_ssid
                            : lv_label_get_text(ui_LabelScreenSettingVerificationSSID);
-        const char *key = lv_textarea_get_text(ui_TextAreaScreenSettingVerificationPassword);
-        bool secured = (s_selected_ap_idx >= 0 && s_selected_ap_idx < s_scan_ap_count)
-                       ? s_scan_aps[s_selected_ap_idx].secured
-                       : true;
+        const char *raw_key = lv_textarea_get_text(ui_TextAreaScreenSettingVerificationPassword);
+        const char *key = raw_key ? raw_key : "";
+        if ((key[0] == '\0' || strstr(key, LV_SYMBOL_BULLET) != nullptr) &&
+            s_selected_ap_saved_pass[0] != '\0') {
+            key = s_selected_ap_saved_pass;
+        }
+        bool secured = s_selected_ap_secured;
 
         if (!ssid || ssid[0] == '\0') goto end;
 
@@ -1815,6 +1832,9 @@ void AppSettings::onKeyboardScreenSettingVerificationReadyCallback(lv_event_t *e
         }
 
         snprintf(s_connect_target_ssid, sizeof(s_connect_target_ssid), "%s", ssid);
+        if (secured && key && key[0] != '\0') {
+            snprintf(s_selected_ap_saved_pass, sizeof(s_selected_ap_saved_pass), "%s", key);
+        }
         char cmd[192];
         snprintf(cmd, sizeof(cmd), "CONNECT %s\t%s", ssid, secured ? (key ? key : "") : "");
         send_wifi_daemon_cmd(cmd);
@@ -1924,16 +1944,22 @@ void AppSettings::onButtonWifiListClickedEventCallback(lv_event_t * e)
 
     s_selected_ap_idx = idx;
     ui_wifi_ap_t &ap = s_scan_aps[idx];
+    snprintf(s_selected_ap_ssid, sizeof(s_selected_ap_ssid), "%s", ap.ssid);
+    s_selected_ap_secured = ap.secured;
 
     lv_label_set_text_fmt(ui_LabelScreenSettingVerificationSSID, "%s", ap.ssid);
 
     char saved_pass[64] = "";
     bool has_saved = lookup_saved_wifi_pass(ap.ssid, saved_pass, sizeof(saved_pass));
+    snprintf(s_selected_ap_saved_pass, sizeof(s_selected_ap_saved_pass), "%s", has_saved ? saved_pass : "");
+    s_selected_ap_saved = ap.saved || has_saved;
 
     if (ui_TextAreaScreenSettingVerificationPassword) {
+        lv_textarea_set_password_show_time(ui_TextAreaScreenSettingVerificationPassword, 0);
+        lv_textarea_set_password_mode(ui_TextAreaScreenSettingVerificationPassword, false);
+        lv_textarea_set_text(ui_TextAreaScreenSettingVerificationPassword, has_saved ? saved_pass : "");
         lv_textarea_set_password_mode(ui_TextAreaScreenSettingVerificationPassword, true);
         if (s_label_verify_eye) lv_label_set_text(s_label_verify_eye, "Show");
-        lv_textarea_set_text(ui_TextAreaScreenSettingVerificationPassword, has_saved ? saved_pass : "");
     }
 
     if (s_label_verify_meta) {
@@ -1950,7 +1976,7 @@ void AppSettings::onButtonWifiListClickedEventCallback(lv_event_t * e)
     }
 
     if (s_btn_verify_forget) {
-        if (ap.saved || ap.connected) {
+        if (s_selected_ap_saved || ap.connected) {
             lv_obj_clear_flag(s_btn_verify_forget, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_btn_verify_forget, LV_OBJ_FLAG_HIDDEN);
