@@ -841,6 +841,15 @@ static bool process_wifi_cmd_file(void) {
     return false;
 }
 
+static void mark_wifi_boot_done(void) {
+    static bool s_done = false;
+    if (!s_done) {
+        s_done = true;
+        int fd = open("/tmp/slx_wifi_boot_done", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) close(fd);
+    }
+}
+
 static void *wifi_manager_thread(void *arg) {
     (void)arg;
     load_wifi_conf();
@@ -849,13 +858,16 @@ static void *wifi_manager_thread(void *arg) {
     int fallback_cred_idx = 0;
     time_t last_rssi_poll = 0;
     time_t last_bg_scan = 0;
+    bool first_boot_attempt = true;
 
     while (1) {
         if (process_wifi_cmd_file()) {
+            mark_wifi_boot_done();
             continue;
         }
 
         if (!g_wifi_enabled) {
+            mark_wifi_boot_done();
             int status = 0;
             if (network_rt_wlan_isconnected(&status) == 0 && status == 1) {
                 network_rt_wlan_disconnect();
@@ -955,9 +967,26 @@ static void *wifi_manager_thread(void *arg) {
                 perform_wifi_scan();
                 last_bg_scan = time(NULL);
             }
+            mark_wifi_boot_done();
             usleep(250000);
             continue;
         }
+
+        /* Fast boot path when 1 saved network is configured: connect directly before scanning
+         * so Wi-Fi comes up in ~2-3s without waiting for a full 13-channel scan. */
+        if (first_boot_attempt && g_wifi_cred_count == 1) {
+            first_boot_attempt = false;
+            char fast_ssid[64] = {0}, fast_pass[64] = {0};
+            pthread_mutex_lock(&g_wifi_mutex);
+            snprintf(fast_ssid, sizeof(fast_ssid), "%s", g_wifi_creds[0].ssid);
+            snprintf(fast_pass, sizeof(fast_pass), "%s", g_wifi_creds[0].pass);
+            pthread_mutex_unlock(&g_wifi_mutex);
+            if (fast_ssid[0] != '\0' && connect_to_ap(fast_ssid, fast_pass, false) == 0) {
+                mark_wifi_boot_done();
+                continue;
+            }
+        }
+        first_boot_attempt = false;
 
         /* Active Scan & Auto-Reconnect to Saved Network in Range with Strongest Signal (RSSI) */
         if (perform_wifi_scan() == 0) {
@@ -965,7 +994,10 @@ static void *wifi_manager_thread(void *arg) {
             perform_wifi_scan();
         }
         last_bg_scan = time(NULL);
-        if (process_wifi_cmd_file()) continue;
+        if (process_wifi_cmd_file()) {
+            mark_wifi_boot_done();
+            continue;
+        }
 
         typedef struct {
             char ssid[64];
@@ -1028,6 +1060,7 @@ static void *wifi_manager_thread(void *arg) {
                 connect_to_ap(fb_ssid, fb_pass, false);
             }
         }
+        mark_wifi_boot_done();
 
         if (!g_wifi_connected) {
             for (int w = 0; w < 12; w++) {
@@ -1449,6 +1482,7 @@ int main(int argc, char *argv[]) {
             unlink("/tmp/slx_stop_node");
             unlink("/tmp/slx_node_running");
             unlink("/tmp/slx_radio_running");
+            unlink("/tmp/slx_wifi_boot_done");
             unlink("/tmp/slx_ipc.bin");
             unlink("/tmp/load_temp");
 
@@ -1466,11 +1500,15 @@ int main(int argc, char *argv[]) {
                 close(ifd);
             }
 
-            /* Wait up to 4s for UI & Wi-Fi auto-reconnect to initiate on boot, or wake
-             * immediately if the user opens the SuperLexicon app or taps Start. */
-            for (int i = 0; i < 40; i++) {
+            /* Wait until wifi_manager_thread finishes initial SDIO1 association (~3s)
+             * or user explicitly presses Start, up to 12s max, so SDIO0 35MB ELF load
+             * never collides with SDIO1 Wi-Fi association. */
+            for (int i = 0; i < 120; i++) {
                 if (access("/tmp/slx_start_node", F_OK) == 0) {
                     unlink("/tmp/slx_start_node");
+                    break;
+                }
+                if (access("/tmp/slx_wifi_boot_done", F_OK) == 0) {
                     break;
                 }
                 usleep(100000);
