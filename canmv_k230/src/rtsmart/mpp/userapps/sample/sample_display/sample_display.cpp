@@ -2097,6 +2097,10 @@ int main(int argc, char **argv)
     lv_init();
     boot_log("main: lv_port_disp_init");
     lv_port_disp_init();
+    if (lv_disp_get_default()) {
+        lv_disp_set_bg_color(lv_disp_get_default(), lv_color_hex(0x070d19));
+        lv_disp_set_bg_opa(lv_disp_get_default(), LV_OPA_COVER);
+    }
     if (lv_scr_act()) {
         lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x070d19), 0);
         lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
