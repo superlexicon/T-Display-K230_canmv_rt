@@ -108,23 +108,16 @@ static uint32_t calc_crc32_update(uint32_t crc, const uint8_t *buf, size_t len) 
 }
 
 static void trigger_hardware_reboot(void) {
-    remoted_log("Triggering hardware watchdog reboot (power-cycling WIFI_3V3 for clean SDIO reset)...");
+    remoted_log("Triggering hardware watchdog reboot...");
     if (g_log_fp) {
         fflush(g_log_fp);
         fclose(g_log_fp);
         g_log_fp = NULL;
     }
+    network_rt_wlan_set_auto_reconnect(0);
+    network_rt_wlan_disconnect();
     sync();
-    int gfd = open("/dev/gpio", O_RDWR);
-    if (gfd >= 0) {
-        pin_gpio_t p45 = {.pin = 45, .val = 0};
-        ioctl(gfd, GPIO_DM_OUTPUT, &p45);
-        ioctl(gfd, GPIO_WRITE_LOW, &p45);
-        usleep(150000);
-        p45.val = 1;
-        ioctl(gfd, GPIO_WRITE_HIGH, &p45);
-        close(gfd);
-    }
+    usleep(100000);
     const char *wdt_devs[2] = {"/dev/watchdog1", "/dev/watchdog0"};
     for (int i = 0; i < 2; i++) {
         int wfd = open(wdt_devs[i], O_RDWR);
@@ -858,7 +851,6 @@ static void *wifi_manager_thread(void *arg) {
     int fallback_cred_idx = 0;
     time_t last_rssi_poll = 0;
     time_t last_bg_scan = 0;
-    bool first_boot_attempt = true;
 
     while (1) {
         if (process_wifi_cmd_file()) {
@@ -971,22 +963,6 @@ static void *wifi_manager_thread(void *arg) {
             usleep(250000);
             continue;
         }
-
-        /* Fast boot path when 1 saved network is configured: connect directly before scanning
-         * so Wi-Fi comes up in ~2-3s without waiting for a full 13-channel scan. */
-        if (first_boot_attempt && g_wifi_cred_count == 1) {
-            first_boot_attempt = false;
-            char fast_ssid[64] = {0}, fast_pass[64] = {0};
-            pthread_mutex_lock(&g_wifi_mutex);
-            snprintf(fast_ssid, sizeof(fast_ssid), "%s", g_wifi_creds[0].ssid);
-            snprintf(fast_pass, sizeof(fast_pass), "%s", g_wifi_creds[0].pass);
-            pthread_mutex_unlock(&g_wifi_mutex);
-            if (fast_ssid[0] != '\0' && connect_to_ap(fast_ssid, fast_pass, false) == 0) {
-                mark_wifi_boot_done();
-                continue;
-            }
-        }
-        first_boot_attempt = false;
 
         /* Active Scan & Auto-Reconnect to Saved Network in Range with Strongest Signal (RSSI) */
         if (perform_wifi_scan() == 0) {
