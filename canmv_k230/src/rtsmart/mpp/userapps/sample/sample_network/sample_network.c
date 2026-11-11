@@ -1428,9 +1428,11 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    /* Spawn clean single-threaded on-demand supervisor for lora_radio.elf & superlexicon.elf
-     * BEFORE opening Wi-Fi/socket FDs so children inherit zero network handles and never
-     * auto-launch on OS boot; instead they launch only when triggered by the user via UI. */
+    /* Spawn clean single-threaded launcher for lora_radio.elf & superlexicon.elf
+     * BEFORE opening Wi-Fi/socket FDs so children inherit zero network handles.
+     * Auto-starts after 12s (or immediately if the user presses Start in the UI).
+     * Calls execv() directly in bg_pid so no extra supervisor process or broken
+     * RT-Smart waitpid()/unlink("/tmp/load_temp") race occurs during ELF paging. */
     {
         pid_t bg_pid = fork();
         if (bg_pid == 0) {
@@ -1442,152 +1444,61 @@ int main(int argc, char *argv[]) {
             unlink("/tmp/slx_node_starting");
             unlink("/tmp/slx_radio_running");
             unlink("/tmp/slx_ipc.bin");
-            pid_t rpid = -1;
-            pid_t spid = -1;
-            for (;;) {
-                if (rpid > 0) {
-                    int st = 0;
-                    pid_t w = waitpid(rpid, &st, WNOHANG);
-                    if (w == rpid || w < 0) {
-                        rpid = -1;
-                        unlink("/tmp/slx_radio_running");
-                    }
-                }
-                if (spid > 0) {
-                    int st = 0;
-                    pid_t w = waitpid(spid, &st, WNOHANG);
-                    if (w == spid || w < 0) {
-                        spid = -1;
-                        unlink("/tmp/slx_node_running");
-                        unlink("/tmp/slx_node_starting");
-                        int ifd = open("/tmp/slx_ipc.bin", O_WRONLY);
-                        if (ifd >= 0) {
-                            uint32_t zero_hdr[2] = {0, 0};
-                            lseek(ifd, 0x20000, SEEK_SET);
-                            write(ifd, zero_hdr, sizeof(zero_hdr));
-                            close(ifd);
-                        }
-                    }
-                }
+            unlink("/tmp/load_temp");
 
-                if (access("/tmp/slx_stop_node", F_OK) == 0) {
-                    unlink("/tmp/slx_stop_node");
-                    if (spid > 0) {
-                        kill(spid, SIGTERM);
-                        waitpid(spid, NULL, 0);
-                        spid = -1;
-                    }
-                    unlink("/tmp/slx_node_running");
-                    unlink("/tmp/slx_node_starting");
-                    int ifd = open("/tmp/slx_ipc.bin", O_WRONLY);
-                    if (ifd >= 0) {
-                        uint32_t zero_hdr[2] = {0, 0};
-                        lseek(ifd, 0x20000, SEEK_SET);
-                        write(ifd, zero_hdr, sizeof(zero_hdr));
-                        close(ifd);
-                    }
-                }
-
-                if (access("/tmp/slx_start_radio", F_OK) == 0) {
-                    unlink("/tmp/slx_start_radio");
-                    if (rpid > 0) {
-                        kill(rpid, SIGTERM);
-                        waitpid(rpid, NULL, 0);
-                        rpid = -1;
-                        unlink("/tmp/slx_radio_running");
-                    }
-                    struct stat st;
-                    if (stat("/sdcard/lora_radio.elf", &st) == 0) {
-                        rpid = fork();
-                        if (rpid == 0) {
-                            char *rargv[] = {"/sdcard/lora_radio.elf", "ipc:///tmp/slx_ipc.bin", NULL};
-                            execv("/sdcard/lora_radio.elf", rargv);
-                            _exit(127);
-                        }
-                        if (rpid > 0) {
-                            int rfd = open("/tmp/slx_radio_running", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                            if (rfd >= 0) {
-                                char pbuf[32];
-                                int n = snprintf(pbuf, sizeof(pbuf), "%d\n", (int)rpid);
-                                write(rfd, pbuf, n);
-                                close(rfd);
-                            }
-                        }
-                    }
-                }
-
+            /* Wait up to 12s for UI & Wi-Fi to settle on boot, or wake immediately
+             * if the user taps the Start SuperLexicon Node button in the UI. */
+            for (int i = 0; i < 60; i++) {
                 if (access("/tmp/slx_start_node", F_OK) == 0) {
                     unlink("/tmp/slx_start_node");
-                    int sfd = open("/tmp/slx_node_starting", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                    if (sfd >= 0) close(sfd);
-
-                    if (spid > 0) {
-                        kill(spid, SIGTERM);
-                        waitpid(spid, NULL, 0);
-                        spid = -1;
-                        unlink("/tmp/slx_node_running");
-                    }
-
-                    int ifd = open("/tmp/slx_ipc.bin", O_WRONLY);
-                    if (ifd >= 0) {
-                        uint32_t zero_hdr[2] = {0, 0};
-                        lseek(ifd, 0x20000, SEEK_SET);
-                        write(ifd, zero_hdr, sizeof(zero_hdr));
-                        close(ifd);
-                    }
-
-                    struct stat st;
-                    if (rpid <= 0 && stat("/sdcard/lora_radio.elf", &st) == 0) {
-                        rpid = fork();
-                        if (rpid == 0) {
-                            char *rargv[] = {"/sdcard/lora_radio.elf", "ipc:///tmp/slx_ipc.bin", NULL};
-                            execv("/sdcard/lora_radio.elf", rargv);
-                            _exit(127);
-                        }
-                        if (rpid > 0) {
-                            int rfd = open("/tmp/slx_radio_running", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                            if (rfd >= 0) {
-                                char pbuf[32];
-                                int n = snprintf(pbuf, sizeof(pbuf), "%d\n", (int)rpid);
-                                write(rfd, pbuf, n);
-                                close(rfd);
-                            }
-                        }
-                        for (int w = 0; w < 25; w++) {
-                            if (access("/tmp/slx_ipc.bin", F_OK) == 0) break;
-                            usleep(100000);
-                        }
-                        sleep(1);
-                    }
-
-                    if (stat("/sdcard/superlexicon.elf", &st) == 0) {
-                        spid = fork();
-                        if (spid == 0) {
-                            char *sargv[] = {
-                                "/sdcard/superlexicon.elf",
-                                "--config",
-                                "/sdcard/k230-config.json",
-                                "--roaming",
-                                NULL
-                            };
-                            execv("/sdcard/superlexicon.elf", sargv);
-                            _exit(127);
-                        }
-                        if (spid > 0) {
-                            int nfd = open("/tmp/slx_node_running", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-                            if (nfd >= 0) {
-                                char pbuf[32];
-                                int n = snprintf(pbuf, sizeof(pbuf), "%d\n", (int)spid);
-                                write(nfd, pbuf, n);
-                                close(nfd);
-                            }
-                        }
-                    } else {
-                        unlink("/tmp/slx_node_starting");
-                    }
+                    break;
                 }
                 usleep(200000);
             }
+
+            int sfd = open("/tmp/slx_node_starting", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (sfd >= 0) close(sfd);
+
+            struct stat st;
+            if (stat("/sdcard/lora_radio.elf", &st) == 0) {
+                pid_t rpid = fork();
+                if (rpid == 0) {
+                    char *rargv[] = {"/sdcard/lora_radio.elf", "ipc:///tmp/slx_ipc.bin", NULL};
+                    execv("/sdcard/lora_radio.elf", rargv);
+                    _exit(127);
+                }
+                if (rpid > 0) {
+                    int rfd = open("/tmp/slx_radio_running", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+                    if (rfd >= 0) {
+                        char pbuf[32];
+                        int n = snprintf(pbuf, sizeof(pbuf), "%d\n", (int)rpid);
+                        write(rfd, pbuf, n);
+                        close(rfd);
+                    }
+                }
+                sleep(3);
+                unlink("/tmp/load_temp");
+            }
+
+            if (stat("/sdcard/superlexicon.elf", &st) == 0) {
+                int nfd = open("/tmp/slx_node_running", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+                if (nfd >= 0) {
+                    char pbuf[32];
+                    int n = snprintf(pbuf, sizeof(pbuf), "%d\n", (int)getpid());
+                    write(nfd, pbuf, n);
+                    close(nfd);
+                }
+                char *sargv[] = {
+                    "/sdcard/superlexicon.elf",
+                    "--config",
+                    "/sdcard/k230-config.json",
+                    "--roaming",
+                    NULL
+                };
+                execv("/sdcard/superlexicon.elf", sargv);
+                unlink("/tmp/slx_node_running");
+            }
+            unlink("/tmp/slx_node_starting");
             _exit(0);
         }
     }
